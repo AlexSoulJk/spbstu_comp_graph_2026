@@ -1,0 +1,56 @@
+cbuffer SceneCB : register(b2)
+{
+    struct PointLight
+    {
+        float3 Position;
+        float Range;
+        float3 Color;
+        float Intensity;
+    };
+
+    PointLight lights[3];
+
+    float3 CameraPos;
+    float Ambient;
+
+    float3 BaseColor;
+    float _pad;
+};
+
+struct PS_INPUT
+{
+    float4 Pos : SV_POSITION;
+    float3 WorldPos : TEXCOORD0;
+    float3 NormalW : TEXCOORD1;
+};
+
+float3 ApplyPoint(PointLight L, float3 P, float3 N, float3 V)
+{
+    float3 Lvec = L.Position - P;
+    float dist = length(Lvec);
+    float3 Ldir = Lvec / max(dist, 1e-4);
+
+    float atten = 1.0 - saturate(dist / L.Range);
+
+    float diff = max(dot(N, Ldir), 0.0);
+    float3 diffuse = L.Color * diff * L.Intensity * atten;
+
+    float3 H = normalize(Ldir + V);
+    float spec = pow(max(dot(N, H), 0.0), 32.0);
+    float3 specular = L.Color * (0.12 * spec) * L.Intensity * atten;
+
+    return diffuse + specular;
+}
+
+float4 main(PS_INPUT input) : SV_Target
+{
+    float3 N = normalize(input.NormalW);
+    float3 V = normalize(CameraPos - input.WorldPos);
+
+    float3 lightSum = float3(Ambient, Ambient, Ambient);
+    [unroll] for (int i = 0; i < 3; ++i)
+        lightSum += ApplyPoint(lights[i], input.WorldPos, N, V);
+
+    float3 finalColor = BaseColor * lightSum;
+    return float4(finalColor, 1.0f);
+}
