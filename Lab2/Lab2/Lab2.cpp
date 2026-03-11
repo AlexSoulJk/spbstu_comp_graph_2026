@@ -1,4 +1,4 @@
-﻿// Lab2.cpp : Определяет точку входа для приложения.
+// Lab2.cpp : Определяет точку входа для приложения.
 //
 
 #include "framework.h"
@@ -45,25 +45,29 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_LAB2));
 
     MSG msg = {};
-    while (msg.message != WM_QUIT)
+    bool exit = false;
+    while (!exit)
     {
         if (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE))
         {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-        else
-        {
-            if (g_Render && (!IsIconic(g_Render->GetHWND())))
+            if (msg.message == WM_QUIT)
             {
-                /*OutputDebugString(_T("Render\n"));*/
-                g_Render->RenderStart();
+                exit = true;
             }
+            if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+            {
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+        }
+
+        else if (g_Render)
+        {
+            g_Render->RenderStart();
         }
     }
 
     if (g_Render) {
-        g_Render->Terminate();
         g_Render.reset();
     }
 
@@ -75,11 +79,17 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     WNDCLASSEXW wcex = {};
 
     wcex.cbSize = sizeof(WNDCLASSEX);
+
     wcex.style = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc = WndProc;
+    wcex.cbClsExtra = 0;
+    wcex.cbWndExtra = 0;
     wcex.hInstance = hInstance;
-    wcex.hbrBackground = NULL;
+    wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_LAB2));
+    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcex.lpszClassName = szWindowClass;
+    wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
     return RegisterClassExW(&wcex);
 }
@@ -144,8 +154,8 @@ bool IsCameraControlKey(WPARAM wParam)
     case VK_LEFT:
     case VK_RIGHT:
     case VK_ADD:
-    case VK_SPACE:
     case VK_SUBTRACT:
+    case VK_SPACE:
     case '1':
     case '2':
     case '3':
@@ -155,11 +165,11 @@ bool IsCameraControlKey(WPARAM wParam)
     }
 }
 
-void HandleKeyDown(WPARAM wParam)
+void HandleKeyDown(WPARAM wParam, LPARAM lParam)
 {
     if (IsCameraControlKey(wParam))
     {
-        g_Render->UpdateCamera(wParam);
+        g_Render->UpdateCamera(wParam, lParam);
     }
     else if (wParam == VK_ESCAPE)
     {
@@ -173,21 +183,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
     case WM_SIZE:
         HandleResize(wParam);
         return 0;
 
     case WM_KEYDOWN:
-        HandleKeyDown(wParam);
+        HandleKeyDown(wParam, lParam);
         return 0;
 
-    case WM_DESTROY:
-        PostQuitMessage(0);
+    case WM_MOUSEMOVE:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+        g_Render->HandleMouse(message, lParam);
         return 0;
-
+    
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
+    return 0;
 }
 
 

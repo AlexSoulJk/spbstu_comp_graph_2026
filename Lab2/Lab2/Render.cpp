@@ -22,6 +22,12 @@
         return hr; \
     }
 
+struct Vertex
+{
+    float x, y, z;
+    COLORREF color;
+};
+
 struct MatrixBuffer
 {
     XMMATRIX m;
@@ -40,17 +46,97 @@ void Render::SetDObjName(ID3D11DeviceChild* resource, const std::string& name) {
     }
 }
 
+void Render::InitLights()
+{
+    m_pointLights.clear();
+    m_pointLights.reserve(3);
+
+    {
+        auto L = std::make_unique<PointLight>();
+        L->SetName(L"RedLight 1");
+        L->SetPosition({ 0.4f, 0.0f, -1.5f });
+        L->SetColor({ 1.0f, 0.0f, 0.0f });
+        L->SetRange(1.0f);
+        L->SetIntensity(25.0f);
+        m_pointLights.push_back(std::move(L));
+    }
+    {
+        auto L = std::make_unique<PointLight>();
+        L->SetName(L"RedLight 2");
+        L->SetPosition({ 0.0f, 0.0f, -1.5f });
+        L->SetColor({ 0.0f, 0.0f, 1.0f });
+        L->SetRange(1.0f);
+        L->SetIntensity(10.0f);
+        m_pointLights.push_back(std::move(L));
+    }
+    {
+        auto L = std::make_unique<PointLight>();
+        L->SetName(L"RedLight 3");
+        L->SetPosition({ -0.4f, 0.0f, -1.5f });
+        L->SetColor({ 0.0f, 1.0f, 0.0f });
+        L->SetRange(1.0f);
+        L->SetIntensity(50.0f);
+        m_pointLights.push_back(std::move(L));
+    }
+
+    OutputDebugString(L"[INFO] 3 point lights created\n");
+}
+
+HRESULT Render::InitScenBuffer()
+{
+    D3D11_BUFFER_DESC bd{};
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.ByteWidth = sizeof(SceneCB);
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    HRESULT hr = m_pDevice->CreateBuffer(&bd, nullptr, &m_pSceneCB);
+    DX_CHECK(hr, L"Create SceneCB failed");
+    SetDObjName(m_pSceneCB, "Scene_CB");
+    return hr;
+}
+
+void Render::RenderScene()
+{
+    float intensityMul = (m_lightPowerMode == 0) ? 1.0f : (m_lightPowerMode == 1) ? 10.0f : 100.0f;
+
+    D3D11_MAPPED_SUBRESOURCE ms{};
+    if (SUCCEEDED(m_pDeviceContext->Map(m_pSceneCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)))
+    {
+        SceneCB* cb = (SceneCB*)ms.pData;
+
+        for (int i = 0; i < 3; ++i)
+        {
+            PointLightGPU gpu{};
+            m_pointLights[i]->Fill(gpu);
+            gpu.Intensity *= intensityMul;
+            cb->Lights[i] = gpu;
+        }
+
+        cb->CameraPos = { 0.0f, 0.0f, -5.0f };
+
+        cb->BaseColor = { 0.55f, 0.55f, 0.55f };
+        cb->Ambient = 0.06f;
+
+        m_pDeviceContext->Unmap(m_pSceneCB, 0);
+    }
+
+    m_pDeviceContext->PSSetConstantBuffers(2, 1, &m_pSceneCB);
+}
+
 
 Render::Render(HWND hWnd) : m_hWnd(hWnd), camera(nullptr), m_currentModel(nullptr),
     m_pDevice(nullptr),
     m_pDeviceContext(nullptr),
     m_pSwapChain(nullptr),
-    m_pRenderTargetView(nullptr),
+    m_pRenderedSceneTexture(nullptr),
     m_pPixelShader(nullptr),
     m_pVertexShader(nullptr),
     m_pInputLayout(nullptr),
     m_szTitle(nullptr),
-    m_szWindowClass(nullptr){}
+    m_PostProcessingPass(nullptr),
+    m_szWindowClass(nullptr),
+    m_pPostProcessedTexture(nullptr){}
 
 HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
 {
@@ -105,16 +191,22 @@ HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
         OutputDebugString(L"[WARNING] ID3DUserDefinedAnnotation not found\n");
     }
 
+    RECT rc = { 0, 0, 800, 600 };
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
+
     DXGI_SWAP_CHAIN_DESC swapChainDesc = { 0 };
     swapChainDesc.BufferCount = 2;
+    swapChainDesc.BufferDesc.Width = rc.right - rc.left;
+    swapChainDesc.BufferDesc.Height = rc.bottom - rc.top;
     swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapChainDesc.BufferDesc.RefreshRate.Numerator = 60;
+    swapChainDesc.BufferDesc.RefreshRate.Denominator = 1;
     swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapChainDesc.OutputWindow = m_hWnd;
-    swapChainDesc.SampleDesc.Count = 4;
+    swapChainDesc.SampleDesc.Count = 1;
     swapChainDesc.SampleDesc.Quality = 0;
-    swapChainDesc.Windowed = true;
-    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    swapChainDesc.Flags = 0;
+    swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    swapChainDesc.Windowed = TRUE;
 
     hr = pFactory->CreateSwapChain(m_pDevice, &swapChainDesc, &m_pSwapChain);
     pAdapter->Release();
@@ -124,11 +216,14 @@ HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
         DX_CHECK(hr, L"Не удалось создать цепочку подкачки (SwapChain)");
         return hr;
     }
+
     InitLights();
     if (SUCCEEDED(hr)) hr = ConfigureBackBuffer();
     if (SUCCEEDED(hr)) hr = InitGeometry(init_code);
     if (SUCCEEDED(hr)) hr = InitBufferShader();
     if (SUCCEEDED(hr)) hr = InitScenBuffer();
+    m_PostProcessingPass = new Postprocessing;
+    hr = m_PostProcessingPass->Init(m_pDevice, m_pDeviceContext);
 
     if (FAILED(hr))
     {
@@ -136,54 +231,6 @@ HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
     }
 
     return hr;
-}
-
-HRESULT Render::InitScenBuffer() {
-    D3D11_BUFFER_DESC bd{};
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.ByteWidth = sizeof(SceneCB);
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-    HRESULT hr = m_pDevice->CreateBuffer(&bd, nullptr, &m_pSceneCB);
-    DX_CHECK(hr, L"Create SceneCB failed");
-    SetDObjName(m_pSceneCB, "Scene_CB");
-    return hr;
-}
-
-void Render::InitLights() {
-    m_pointLights.clear();
-    m_pointLights.reserve(3);
-
-    {
-        auto L = std::make_unique<PointLight>();
-        L->SetName(L"RedLight 1");
-        L->SetPosition({ 0.0f, 2.2f, 0.0f });
-        L->SetColor({ 1.0f, 0.0f, 0.0f });
-        L->SetRange(1.0f);
-        L->SetIntensity(20.0f);
-        m_pointLights.push_back(std::move(L));
-    }
-    {
-        auto L = std::make_unique<PointLight>();
-        L->SetName(L"RedLight 2");
-        L->SetPosition({ -1.5f, 0.0f, 0.0f });
-        L->SetColor({ 1.0f, 0.0f, 0.0f });
-        L->SetRange(1.0f);
-        L->SetIntensity(20.0f);
-        m_pointLights.push_back(std::move(L));
-    }
-    {
-        auto L = std::make_unique<PointLight>();
-        L->SetName(L"RedLight 3");
-        L->SetPosition({ -2.2f, 0.0f, 0.0f });
-        L->SetColor({ 1.0f, 0.0f, 0.0f });
-        L->SetRange(1.0f);
-        L->SetIntensity(20.0f);
-        m_pointLights.push_back(std::move(L));
-    }
-
-    OutputDebugString(L"[INFO] 3 point lights created\n");
 }
 
 HRESULT Render::InitBufferShader()
@@ -273,42 +320,38 @@ HRESULT Render::InitModel(ModelFactory::ModelCode code) {
 
 void Render::Terminate()
 {
-    if (m_currentModel) {
-        ModelFactory::ReleaseModel(m_currentModel);
-        m_currentModel = nullptr;
-    }
-    if (camera) {
-        delete camera;
-        camera = nullptr;
-    }
-
-    if (m_pDeviceContext) {
-        m_pDeviceContext->ClearState();
-        m_pDeviceContext->Flush();
-    }
-
-    if (m_pSwapChain) {
-        m_pSwapChain->SetFullscreenState(FALSE, nullptr);
-        m_pSwapChain->Release();
-        m_pSwapChain = nullptr;
-    }
-
-    if (m_pInputLayout) { m_pInputLayout->Release(); m_pInputLayout = nullptr; }
-    if (m_pVertexShader) { m_pVertexShader->Release(); m_pVertexShader = nullptr; }
-    if (m_pPixelShader) { m_pPixelShader->Release(); m_pPixelShader = nullptr; }
-    if (m_pRenderTargetView) { m_pRenderTargetView->Release(); m_pRenderTargetView = nullptr; }
-    if (m_pSceneCB) { m_pSceneCB->Release(); m_pSceneCB = nullptr; }
-
-    if (m_pDeviceContext) {
-        m_pDeviceContext->Flush();
-        m_pDeviceContext->Release();
-        m_pDeviceContext = nullptr;
+    
+    if (m_PostProcessingPass) {
+        delete m_PostProcessingPass;
+        m_PostProcessingPass = nullptr;
     }
 
     if (m_pAnnotation) {
         m_pAnnotation->Release();
         m_pAnnotation = nullptr;
     }
+
+    if (m_currentModel) {
+        ModelFactory::ReleaseModel(m_currentModel);
+        m_currentModel = nullptr;
+    }
+
+    if (camera) {
+        delete camera;
+        camera = nullptr;
+    }
+
+    if (m_pInputLayout) { m_pInputLayout->Release(); m_pInputLayout = nullptr; }
+    if (m_pVertexShader) { m_pVertexShader->Release(); m_pVertexShader = nullptr; }
+    if (m_pPixelShader) { m_pPixelShader->Release(); m_pPixelShader = nullptr; }
+
+    if (m_pSceneCB) {
+        m_pSceneCB->Release();
+        m_pSceneCB = nullptr;
+    }
+
+    if (m_pPostProcessedTexture) { delete m_pPostProcessedTexture; m_pPostProcessedTexture = nullptr; }
+    if (m_pRenderedSceneTexture) { delete m_pRenderedSceneTexture; m_pRenderedSceneTexture = nullptr; }
 
     ID3D11Debug* d3dDebug = nullptr;
 #ifdef _DEBUG
@@ -317,6 +360,19 @@ void Render::Terminate()
     }
 #endif
 
+    if (m_pSwapChain) {
+        m_pSwapChain->SetFullscreenState(FALSE, nullptr);
+        m_pSwapChain->Release();
+        m_pSwapChain = nullptr;
+    }
+
+    if (m_pDeviceContext) {
+        m_pDeviceContext->ClearState();
+        m_pDeviceContext->Flush();
+        m_pDeviceContext->Release();
+        m_pDeviceContext = nullptr;
+    }
+    
     if (m_pDevice) {
         m_pDevice->Release();
         m_pDevice = nullptr;
@@ -329,7 +385,7 @@ void Render::Terminate()
         OutputDebugString(L"------------------------------------------------\n");
         OutputDebugString(L"REPORT LIVE DEVICE OBJECTS:\n");
         // D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL покажет всё максимально подробно
-        d3dDebug->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
+        d3dDebug->ReportLiveDeviceObjects(D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL);
         OutputDebugString(L"------------------------------------------------\n");
 
         // Освобождаем последний интерфейс - теперь Девайс умрет окончательно
@@ -390,41 +446,28 @@ HRESULT Render::CompileShader(const std::wstring& path, ID3DBlob** pBlob) {
     return hr;
 }
 
-void Render::UpdateCamera(WPARAM wParam) {
+void Render::UpdateCamera(WPARAM wParam, LPARAM lParam) {
     switch(wParam) {
         case 'W':
-            // Upward rotation
-            camera->Rotate({ 0.0f, 0.01f });
-            break;
-        case 'S': // Rotating downwards
-            camera->Rotate({ 0.0f, -0.01f });
-            break;
-        case 'A': // Left rotation
-            camera->Rotate({ -0.01f, 0.0f });
-            break;
-        case 'D': // Right rotation
-            camera->Rotate({0.01f, 0.0f});
-            break;
         case VK_UP:
-            camera->Move({ 0.0f, 1.0f, 0.0f });
+            camera->Move(MoveDirection::FORWARD);
             break;
+        case 'S':
         case VK_DOWN:
-            camera->Move({ 0.0f, -1.0f, 0.0f });
+            camera->Move(MoveDirection::BACKWARD);
             break;
+        case 'A':
         case VK_LEFT:
-            camera->Move({ -1.0f, 0.0f, 0.0f });
+            camera->Move(MoveDirection::LEFT);
             break;
+        case 'D':
         case VK_RIGHT:
-            camera->Move({ 1.0f, 0.0f, 0.0f });
+            camera->Move(MoveDirection::RIGHT);
             break;
+      
         case VK_ADD:
-            camera->Move({ 0.0f, 0.0f, 1.0f });
-            break;
         case 0xBB:
-            camera->Move({ 0.0f, 0.0f, 1.0f });
-            break;
-        case VK_SUBTRACT:
-            camera->Move({ 0.0f, 0.0f, -1.0f });
+            //camera->Move({ 0.0f, 0.0f, 1.0f });
             break;
         case VK_SPACE:
             m_currentModel->ChangeRotationable();
@@ -432,59 +475,63 @@ void Render::UpdateCamera(WPARAM wParam) {
         case '1': m_lightPowerMode = 0; OutputDebugString(L"[INFO] Light intensity mode = 1\n"); break;
         case '2': m_lightPowerMode = 1; OutputDebugString(L"[INFO] Light intensity mode = 10\n"); break;
         case '3': m_lightPowerMode = 2; OutputDebugString(L"[INFO] Light intensity mode = 100\n"); break;
-
     }
 
 }
 
-void Render::RenderScene() {
-    float intensityMul = (m_lightPowerMode == 0) ? 1.0f : (m_lightPowerMode == 1) ? 10.0f : 100.0f;
-
-    D3D11_MAPPED_SUBRESOURCE ms{};
-    if (SUCCEEDED(m_pDeviceContext->Map(m_pSceneCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)))
+void Render::HandleMouse(UINT message, LPARAM lParam)
+{
+    switch (message)
     {
-        SceneCB* cb = (SceneCB*)ms.pData;
-
-        // упаковываем 3 света
-        for (int i = 0; i < 3; ++i)
-        {
-            PointLightGPU gpu{};
-            m_pointLights[i]->Fill(gpu);
-            gpu.Intensity *= intensityMul;
-            cb->Lights[i] = gpu;
-        }
-
-        // пока камера-позиция может быть захардкожена, если у Camera нет getter:
-        cb->CameraPos = { 0.0f, 0.0f, -5.0f };
-
-        // серый материал куба
-        cb->BaseColor = { 0.55f, 0.55f, 0.55f };
-        cb->Ambient = 0.06f;
-
-        m_pDeviceContext->Unmap(m_pSceneCB, 0);
+    case WM_RBUTTONDOWN:
+        camera->RightButton(true, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        break;
+    case WM_RBUTTONUP:
+        camera->RightButton(false, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        break;
+    case WM_MOUSEMOVE:
+        camera->Rotate({ (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam) });
+        break;
+    default:
+        break;
     }
-
-    m_pDeviceContext->PSSetConstantBuffers(2, 1, &m_pSceneCB);
 }
 
 
 void Render::RenderStart()
 {
+    m_PostProcessingPass->Update(m_pDevice, m_pDeviceContext);
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Render Frame");
+
+    // Очистка
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Clear");
-    m_pDeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
+    //m_pDeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
+    m_pDeviceContext->ClearState();
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    m_pDeviceContext->PSSetShaderResources(0, 1, &nullSRV);
+    m_pRenderedSceneTexture->set(m_pDevice, m_pDeviceContext);
     float BackColor[4] = { 0.48f, 0.57f, 0.48f, 1.0f };
-    m_pDeviceContext->ClearRenderTargetView(m_pRenderTargetView, BackColor);
+    //m_pDeviceContext->ClearRenderTargetView(m_pRenderTargetView, BackColor);
+    m_pRenderedSceneTexture->clear(BackColor, m_pDevice, m_pDeviceContext);
     if (m_pAnnotation) m_pAnnotation->EndEvent();
     RenderScene();
     m_currentModel->Update(0.0);
-
     RECT rc;
     GetClientRect(m_hWnd, &rc);
     UINT width = rc.right - rc.left;
     UINT height = rc.bottom - rc.top;
-    HRESULT hr = camera->CameraUpdate((float)width / (float)height);
 
+    D3D11_VIEWPORT viewport;
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = width;
+    viewport.Height = height;
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    m_pDeviceContext->RSSetViewports(1, &viewport);
+
+    HRESULT hr = camera->CameraUpdate((float)width / (float)height);
+    m_PostProcessingPass->Update(m_pDevice, m_pDeviceContext);
     m_pDeviceContext->IASetInputLayout(m_pInputLayout);
     m_pDeviceContext->VSSetShader(m_pVertexShader, nullptr, 0);
     m_pDeviceContext->PSSetShader(m_pPixelShader, nullptr, 0);
@@ -493,7 +540,9 @@ void Render::RenderStart()
     m_currentModel->Render();
     if (m_pAnnotation) m_pAnnotation->EndEvent();
 
-    m_pSwapChain->Present(1, 0);
+    m_PostProcessingPass->applyTonemapEffect(m_pDevice, m_pDeviceContext, m_pAnnotation, m_pRenderedSceneTexture, m_pPostProcessedTexture);
+
+    m_pSwapChain->Present(0, 0);
     if (m_pAnnotation) m_pAnnotation->EndEvent();
 }
 
@@ -522,25 +571,57 @@ HRESULT Render::ConfigureBackBuffer()
 
     SetDObjName(pBackBuffer, "Main_BackBuffer_Texture");
 
-    hr = m_pDevice->CreateRenderTargetView(pBackBuffer, nullptr, &m_pRenderTargetView);
-    pBackBuffer->Release();
+    RECT rc;
+    GetWindowRect(m_hWnd, &rc);
+    UINT width = rc.right - rc.left;
+    UINT height = rc.bottom - rc.top;
+
+    D3D11_VIEWPORT viewport;
+    viewport.TopLeftX = 0;
+    viewport.TopLeftY = 0;
+    viewport.Width = (FLOAT)width;
+    viewport.Height = (FLOAT)height;
+    viewport.MinDepth = 0.0f;
+    viewport.MaxDepth = 1.0f;
+    m_pDeviceContext->RSSetViewports(1, &viewport);
+
+    if (!m_pRenderedSceneTexture)
+        m_pRenderedSceneTexture = new RenderTargetTexture(width, height);
+    else
+        m_pRenderedSceneTexture->setScreenSize(width, height);
+    hr = m_pRenderedSceneTexture->initResource(m_pDevice, m_pDeviceContext);
     if (FAILED(hr)) {
         DX_CHECK(hr, L"Ошибка создания RenderTargetView");
         return hr;
     }
-        
+    SetDObjName(m_pRenderedSceneTexture->getRTV(), "Main_RTV");
 
-    SetDObjName(m_pRenderTargetView, "Main_RTV");
+    if (!m_pPostProcessedTexture)
+        m_pPostProcessedTexture = new RenderTargetTexture(width, height);
+    else
+        m_pPostProcessedTexture->setScreenSize(width, height);
+    hr = m_pPostProcessedTexture->initResource(m_pDevice, m_pDeviceContext, pBackBuffer);
+    if (FAILED(hr)) {
+        DX_CHECK(hr, L"Ошибка создания RenderTargetView");
+        return hr;
+    }
+
+    SetDObjName(m_pPostProcessedTexture->getRTV(), "PostProcessed_RTV");
+
+    pBackBuffer->Release();
 
     return hr;
 }
 
 void Render::Resize()
 {
-    if (m_pRenderTargetView)
+    if (m_pRenderedSceneTexture)
     {
-        m_pRenderTargetView->Release();
-        m_pRenderTargetView = nullptr;
+        m_pRenderedSceneTexture->Release();
+    }
+    if (m_pPostProcessedTexture)
+    {
+        m_pPostProcessedTexture->Release();
     }
 
     if (m_pSwapChain)
@@ -552,7 +633,7 @@ void Render::Resize()
         UINT width = rc.right - rc.left;
         UINT height = rc.bottom - rc.top;
 
-        hr = m_pSwapChain->ResizeBuffers(1, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
+        hr = m_pSwapChain->ResizeBuffers(2, width, height, DXGI_FORMAT_R8G8B8A8_UNORM, 0);
 
         if (FAILED(hr)) {
             OutputDebugString(L"[FATAL] ResizeBuffers failed\n");
@@ -569,8 +650,6 @@ void Render::Resize()
             PostQuitMessage(0);
             return;
         }
-
-        m_pDeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
 
         D3D11_VIEWPORT vp;
         vp.Width = (FLOAT)width;

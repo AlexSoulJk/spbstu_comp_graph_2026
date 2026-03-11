@@ -16,7 +16,8 @@ public:
     void Fill(PointLightGPU& out) const override;
 
 private:
-    XMFLOAT3 m_position = { 0.0f, 0.0f, 0.0f };
+    XMFLOAT3 m_position = { 0.0f, 0.0f, -1.0f };
     float    m_range = 10.0f;
     float    m_intensity = 10.0f;
 };
+

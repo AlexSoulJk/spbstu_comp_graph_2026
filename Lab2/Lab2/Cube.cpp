@@ -9,12 +9,14 @@ static void SetDebugName(ID3D11DeviceChild* child, const std::string& name) {
 }
 
 void Cube::Update(float dt) {
-    if (!is_rotationable) return;
-    m_CubeAngle += 0.01f;
-    if (m_CubeAngle > XM_2PI) m_CubeAngle -= XM_2PI;
-    XMMATRIX model = XMMatrixRotationY(m_CubeAngle);
-    XMMATRIX mT = XMMatrixTranspose(model);
-    m_context->UpdateSubresource(m_pModelBuffer, 0, nullptr, &mT, 0, 0);
+    if (is_rotationable)
+    {
+        m_CubeAngle += 0.01f;
+        if (m_CubeAngle > XM_2PI) m_CubeAngle -= XM_2PI;
+        XMMATRIX model = XMMatrixRotationY(m_CubeAngle);
+        XMMATRIX mT = XMMatrixTranspose(model);
+        m_context->UpdateSubresource(m_pModelBuffer, 0, nullptr, &mT, 0, 0);
+    }
     m_context->VSSetConstantBuffers(0, 1, &m_pModelBuffer);
 }
 
@@ -83,7 +85,7 @@ HRESULT Cube::InitModel(ID3D11Device* device) {
         20, 23, 22
     };
 
-    // Создание буферов
+    // ???????? ???????
     D3D11_BUFFER_DESC bd = {};
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.ByteWidth = sizeof(Vertex) * ARRAYSIZE(vertices);

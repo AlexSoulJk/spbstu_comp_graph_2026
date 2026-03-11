@@ -10,6 +10,13 @@ struct CameraBuffer
     DirectX::XMMATRIX vp;
 };
 
+enum struct MoveDirection {
+    FORWARD = 0,
+    BACKWARD,
+    LEFT,
+    RIGHT,
+};
+
 class Camera {
 
 
@@ -23,18 +30,26 @@ public:
         }
     }
 
-    void Move(XMFLOAT3 direction);
+    void Move(MoveDirection direction);
     void Rotate(XMFLOAT2 angleDirection);
+    void RightButton(bool pressed, int posX, int posY);
 
     HRESULT CameraUpdate(float aspectRatio);
     HRESULT InitVPBuffer(ID3D11Device* device);
     XMFLOAT3 position;
-    XMFLOAT3 focus;
+    XMFLOAT3 curDirection;
+    XMFLOAT3 right;
+    XMFLOAT3 up = { 0.0, 1.0, 0.0 };
     float speed;
+    float sensitivity;
     float LRAngle; 
     float UDAngle;
 
 private:
+
+    bool isRightButtonPressed;
+    float mousePosX;
+    float mousePosY;
 
     XMMATRIX GetVP(float aspectRatio) const;
 

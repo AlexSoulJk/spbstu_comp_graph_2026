@@ -15,14 +15,18 @@ public:
     DirectX::XMMATRIX GetModelMatrix() const { return m_modelMatrix; }
     ModelManagerAbstract(ID3D11DeviceContext* context);
     virtual ~ModelManagerAbstract() {
-        if (m_pVertexBuffer) { m_pVertexBuffer->Release() , m_pVertexBuffer = nullptr;
-        };
+        if (m_pVertexBuffer) {
+            m_pVertexBuffer->Release(); 
+            m_pVertexBuffer = nullptr;
+        }
         if (m_pIndexBuffer) {
-            m_pIndexBuffer->Release(), m_pIndexBuffer = nullptr;
-        };
+            m_pIndexBuffer->Release(); 
+            m_pIndexBuffer = nullptr;
+        }
         if (m_pModelBuffer) {
-            m_pModelBuffer->Release(), m_pModelBuffer = nullptr;
-        };
+            m_pModelBuffer->Release(); 
+            m_pModelBuffer = nullptr;
+        }
     }
     virtual HRESULT InitModel(ID3D11Device* device) = 0;
     void ChangeRotationable() {

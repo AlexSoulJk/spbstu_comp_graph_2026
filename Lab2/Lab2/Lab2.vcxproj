@@ -21,7 +21,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{7ae1c1bc-d8db-4297-b58f-3b2496d2f961}</ProjectGuid>
+    <ProjectGuid>{ac70dc4a-9863-41db-ad25-1ac7842a5c0a}</ProjectGuid>
     <RootNamespace>Lab2</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
@@ -130,11 +130,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="D3DInclude.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Lab2.h" />
     <ClInclude Include="LightBase.h" />
     <ClInclude Include="PointLight.h" />
+    <ClInclude Include="Postprocessing.h" />
+    <ClInclude Include="RenderTargetTexture.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="ScreenPlane.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="Cube.h" />
@@ -145,11 +149,15 @@
   <ItemGroup>
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="Cube.cpp" />
+    <ClCompile Include="D3DInclude.cpp" />
     <ClCompile Include="LightBase.cpp" />
     <ClCompile Include="ModelMangerAbstract.cpp" />
     <ClCompile Include="PointLight.cpp" />
+    <ClCompile Include="Postprocessing.cpp" />
     <ClCompile Include="Render.cpp" />
     <ClCompile Include="Lab2.cpp" />
+    <ClCompile Include="RenderTargetTexture.cpp" />
+    <ClCompile Include="ScreenPlane.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Lab2.rc" />
@@ -166,6 +174,22 @@
     <CopyFileToFolders Include="VertexColor.vs">
       <FileType>Document</FileType>
       <DestinationFolder>$(OutDir)</DestinationFolder>
+    </CopyFileToFolders>
+  </ItemGroup>
+  <ItemGroup>
+    <CopyFileToFolders Include="BrightnessCalc.ps">
+      <FileType>Document</FileType>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="HDR.ps">
+      <FileType>Document</FileType>
+    </CopyFileToFolders>
+    <CopyFileToFolders Include="sampling.ps">
+      <FileType>Document</FileType>
+    </CopyFileToFolders>
+  </ItemGroup>
+  <ItemGroup>
+    <CopyFileToFolders Include="ScreenPlane.vs">
+      <FileType>Document</FileType>
     </CopyFileToFolders>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

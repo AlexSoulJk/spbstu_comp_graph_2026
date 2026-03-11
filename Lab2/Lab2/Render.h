@@ -9,6 +9,8 @@
 #include "Camera.h"
 #include "ModelFactory.h"
 #include "PointLight.h"
+#include "Postprocessing.h"
+#include "RenderTargetTexture.h"
 
 using namespace DirectX;
 
@@ -26,14 +28,14 @@ public:
     HRESULT InitGeometry(ModelFactory::ModelCode code);
     HRESULT InitCamera();
     HRESULT InitModel(ModelFactory::ModelCode code);
-    
 
 
     HRESULT CompileShader(const std::wstring& path, ID3DBlob** pCodeShader=nullptr);
 
     void RenderStart();
     void Resize();
-    void UpdateCamera(WPARAM wParam);
+    void UpdateCamera(WPARAM wParam, LPARAM lParam);
+    void HandleMouse(UINT message, LPARAM lParam);
     void SetMousePos(int x, int y) { m_mousePos.x = x; m_mousePos.y = y; }
     
     HWND GetHWND() const { return m_hWnd; }
@@ -49,27 +51,29 @@ private:
     HRESULT InitScenBuffer();
     void RenderScene();
     HWND m_hWnd;
-    ID3D11Device* m_pDevice;
-    ID3D11DeviceContext* m_pDeviceContext;
+    ID3D11Device* m_pDevice; //
+    ID3D11DeviceContext* m_pDeviceContext; //
 
-    IDXGISwapChain* m_pSwapChain;
-    ID3D11RenderTargetView* m_pRenderTargetView;
+    IDXGISwapChain* m_pSwapChain; //
+    RenderTargetTexture* m_pRenderedSceneTexture; //
+    RenderTargetTexture* m_pPostProcessedTexture; //
 
-    ID3D11PixelShader* m_pPixelShader;
-    ID3D11VertexShader* m_pVertexShader;
-    ID3D11InputLayout* m_pInputLayout;
-    ID3D11Buffer* m_pSceneCB = nullptr;
+    ID3D11Buffer* m_pSceneCB = nullptr; //
     std::vector<std::unique_ptr<PointLight>> m_pointLights;
     int m_lightPowerMode = 1;
 
+    ID3D11PixelShader* m_pPixelShader; //
+    ID3D11VertexShader* m_pVertexShader; //
+    ID3D11InputLayout* m_pInputLayout; //
 
     float m_CubeAngle = 0.0f;
 
     WCHAR* m_szTitle;
     WCHAR* m_szWindowClass;
     POINT m_mousePos = { 0, 0 };
-    Camera* camera;
-    ModelManagerAbstract* m_currentModel;
-    ID3DUserDefinedAnnotation* m_pAnnotation = nullptr;
+    Camera* camera; //
+    ModelManagerAbstract* m_currentModel; //
+    ID3DUserDefinedAnnotation* m_pAnnotation = nullptr; //
+    Postprocessing* m_PostProcessingPass; //
 };
 #endif
