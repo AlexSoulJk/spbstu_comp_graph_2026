@@ -41,6 +41,10 @@ HRESULT Postprocessing::CompileShaderFromFile(const WCHAR* szFileName, LPCSTR sz
 
 Postprocessing::Postprocessing() : maxTextureHeight(0), maxTextureWidth(0) {}
 
+Postprocessing::~Postprocessing() {
+	Release();
+}
+
 void Postprocessing::Update(
 	ID3D11Device* pDevice,
 	ID3D11DeviceContext* pContext)
@@ -53,10 +57,6 @@ void Postprocessing::Update(
 		clearScaledHDRTargets();
 		createDownsamplingRTT((int)vp.Width, (int)vp.Height, pDevice, pContext);
 	}
-
-	float BackColor[4] = { 1.f, 1.f, 1.f, 1.f };
-	for (auto& rtt : scaledHDRTargets)
-		rtt->clear(BackColor, pDevice, pContext);
 }
 
 HRESULT Postprocessing::Init(

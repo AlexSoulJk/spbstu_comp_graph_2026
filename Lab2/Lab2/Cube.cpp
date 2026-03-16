@@ -11,7 +11,7 @@ static void SetDebugName(ID3D11DeviceChild* child, const std::string& name) {
 void Cube::Update(float dt) {
     if (is_rotationable)
     {
-        m_CubeAngle += 0.01f;
+        m_CubeAngle += 0.001f;
         if (m_CubeAngle > XM_2PI) m_CubeAngle -= XM_2PI;
         XMMATRIX model = XMMatrixRotationY(m_CubeAngle);
         XMMATRIX mT = XMMatrixTranspose(model);
