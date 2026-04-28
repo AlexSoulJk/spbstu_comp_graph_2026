@@ -32,6 +32,12 @@ public:
 		RenderTargetTexture* inputRTT,
 		RenderTargetTexture* resultRTT);
 
+	HRESULT applyCopyEffect(
+		ID3D11Device* pDevice,
+		ID3D11DeviceContext* pContext,
+		RenderTargetTexture* inputRTT,
+		RenderTargetTexture* resultRTT);
+
 	void Release();
 private:
 	HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut);

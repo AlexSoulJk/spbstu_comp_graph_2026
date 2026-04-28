@@ -8,6 +8,8 @@
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <iostream>
+#include "imgui/imgui.h"
+#include "imgui/backends/imgui_impl_win32.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -23,6 +25,7 @@ WCHAR szWindowClass[MAX_LOADSTRING] = L"Lab 3. Aloy & Solomatov";
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
+extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 std::unique_ptr<Render> g_Render;
 
@@ -159,6 +162,14 @@ bool IsCameraControlKey(WPARAM wParam)
     case '1':
     case '2':
     case '3':
+    case '4':
+    case '5':
+    case '6':
+    case '7':
+    case 'R':
+    case 'F':
+    case 'T':
+    case 'G':
         return true;
     default:
         return false;
@@ -181,6 +192,12 @@ void HandleKeyDown(WPARAM wParam, LPARAM lParam)
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (ImGui::GetCurrentContext() != nullptr)
+    {
+        if (ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam))
+            return true;
+    }
+
     switch (message)
     {
     case WM_DESTROY:
@@ -192,12 +209,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_KEYDOWN:
+        if (ImGui::GetCurrentContext() != nullptr)
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.WantCaptureKeyboard)
+                return 0;
+        }
         HandleKeyDown(wParam, lParam);
         return 0;
 
     case WM_MOUSEMOVE:
     case WM_RBUTTONDOWN:
     case WM_RBUTTONUP:
+        if (ImGui::GetCurrentContext() != nullptr)
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.WantCaptureMouse)
+                return 0;
+        }
         g_Render->HandleMouse(message, lParam);
         return 0;
 

@@ -267,6 +267,17 @@ HRESULT Postprocessing::applyTonemapEffect(
 	return hr;
 }
 
+HRESULT Postprocessing::applyCopyEffect(
+	ID3D11Device* pDevice,
+	ID3D11DeviceContext* pContext,
+	RenderTargetTexture* inputRTT,
+	RenderTargetTexture* resultRTT)
+{
+	pContext->PSSetShader(PSCopy, nullptr, 0u);
+	processTexture(inputRTT, resultRTT, pDevice, pContext);
+	return S_OK;
+}
+
 void Postprocessing::processTexture(
 	RenderTargetTexture* inputTex,
 	RenderTargetTexture* resultTex,

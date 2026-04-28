@@ -13,8 +13,21 @@ void Cube::Update(float dt) {
     {
         m_CubeAngle += 0.001f;
         if (m_CubeAngle > XM_2PI) m_CubeAngle -= XM_2PI;
+
+        XMVECTOR scaleVec = XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f);
+        XMVECTOR rotQuat = XMQuaternionIdentity();
+        XMVECTOR transVec = XMVectorZero();
         XMMATRIX model = XMMatrixRotationY(m_CubeAngle);
-        XMMATRIX mT = XMMatrixTranspose(model);
+        if (XMMatrixDecompose(&scaleVec, &rotQuat, &transVec, m_modelMatrix))
+        {
+            model =
+                XMMatrixScalingFromVector(scaleVec) *
+                XMMatrixRotationY(m_CubeAngle) *
+                XMMatrixTranslationFromVector(transVec);
+        }
+
+        m_modelMatrix = model;
+        XMMATRIX mT = XMMatrixTranspose(m_modelMatrix);
         m_context->UpdateSubresource(m_pModelBuffer, 0, nullptr, &mT, 0, 0);
     }
     m_context->VSSetConstantBuffers(0, 1, &m_pModelBuffer);

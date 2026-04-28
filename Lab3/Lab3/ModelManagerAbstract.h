@@ -32,6 +32,16 @@ public:
     void ChangeRotationable() {
         is_rotationable = !is_rotationable;
     }
+    void SetModelMatrix(const DirectX::XMMATRIX& model)
+    {
+        m_modelMatrix = model;
+        if (m_context && m_pModelBuffer)
+        {
+            DirectX::XMMATRIX modelT = DirectX::XMMatrixTranspose(m_modelMatrix);
+            m_context->UpdateSubresource(m_pModelBuffer, 0, nullptr, &modelT, 0, 0);
+            m_context->VSSetConstantBuffers(0, 1, &m_pModelBuffer);
+        }
+    }
     virtual void Update(float dt) = 0;
     virtual void Render() = 0;
 protected:
@@ -43,6 +53,6 @@ protected:
 
     DirectX::XMMATRIX m_modelMatrix = DirectX::XMMatrixIdentity();
     float m_rotationAngle = 0.0f;
-    bool is_rotationable = true;
+    bool is_rotationable = false;
 };
 
