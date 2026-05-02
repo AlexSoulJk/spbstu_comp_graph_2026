@@ -170,7 +170,7 @@
 		<CopyFileToFolders Include="SkyVertex.vs" />
 		<CopyFileToFolders Include="VertexColor.vs" />
 		<CopyFileToFolders Include="cat.dds" />
-		<CopyFileToFolders Include="sunset_1024_box.dds" />
+			<CopyFileToFolders Include="SkyBox\sunset_1024_box.dds" />
 	</ItemGroup>
 	<ItemGroup>
 		<None Include="sampling.ps" />

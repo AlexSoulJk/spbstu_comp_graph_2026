@@ -212,10 +212,10 @@
 			<FileType>Document</FileType>
 			<DestinationFolder>$(OutDir)</DestinationFolder>
 		</CopyFileToFolders>
-		<CopyFileToFolders Include="sunset_1024_box.dds">
-			<FileType>Document</FileType>
-			<DestinationFolder>$(OutDir)</DestinationFolder>
-		</CopyFileToFolders>
+			<CopyFileToFolders Include="SkyBox\sunset_1024_box.dds">
+				<FileType>Document</FileType>
+				<DestinationFolder>$(OutDir)</DestinationFolder>
+			</CopyFileToFolders>
 	</ItemGroup>
 	<ItemGroup>
 		<CopyFileToFolders Include="BrightnessCalc.ps">

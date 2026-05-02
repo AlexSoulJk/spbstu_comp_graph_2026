@@ -6,6 +6,11 @@
 #include <d3d11_1.h>
 #include <DirectXMath.h>
 #include <iostream>
+#include <string>
+#include <vector>
+#include "imgui/imgui.h"
+#include "imgui/backends/imgui_impl_win32.h"
+#include "imgui/backends/imgui_impl_dx11.h"
 #include "Camera.h"
 #include "ModelFactory.h"
 #include "PointLight.h"
@@ -49,7 +54,33 @@ private:
     void SetDObjName(ID3D11DeviceChild* resource, const std::string& name);
     void InitLights();
     HRESULT InitScenBuffer();
-    void RenderScene();
+    void RenderScene(float roughness, float metalness, const XMFLOAT3& albedo);
+    void DrawSceneObjects();
+    void RenderSkybox();
+    void RenderLightMarkers();
+    int GetDebugMode() const;
+    bool IsTonemapEnabled() const;
+    void DumpPipelineState(const char* reason);
+    HRESULT InitTextureResources();
+    HRESULT InitSkyResources();
+    void RefreshSkyboxList();
+    std::wstring GetSelectedSkyboxRelativePath() const;
+    void ReleaseTextureResources();
+    void ReleaseSkyResources();
+    void InitImGui();
+    void ShutdownImGui();
+    void RenderImGui();
+
+    enum DebugViewMode
+    {
+        DebugView_NDF = 0,
+        DebugView_Geometry = 1,
+        DebugView_Fresnel = 2,
+        DebugView_Final = 3,
+        DebugView_AlbedoOnly = 4,
+        DebugView_LightMask = 5
+    };
+
     HWND m_hWnd;
     ID3D11Device* m_pDevice; //
     ID3D11DeviceContext* m_pDeviceContext; //
@@ -60,13 +91,62 @@ private:
 
     ID3D11Buffer* m_pSceneCB = nullptr; //
     std::vector<std::unique_ptr<PointLight>> m_pointLights;
-    int m_lightPowerMode = 1;
+    int m_debugViewMode = DebugView_Final;
+    bool m_gridMode = false;
+    bool m_enableTextures = true;
+    bool m_enableNormalMap = true;
+    bool m_enableRoughnessMap = true;
+    bool m_enableSkybox = true;
+    bool m_forceCopyPostprocess = false;
+    bool m_labUiMode = false;
+    bool m_extendViews = true;
+    float m_normalStrength = 1.0f;
+    float m_roughnessMapStrength = 1.0f;
+    int m_materialPresetIndex = 1;
+    int m_skyboxFileIndex = 0;
+    bool m_requestDiagnosticsDump = false;
+    float m_materialRoughness = 0.35f;
+    float m_materialMetalness = 0.0f;
+    XMFLOAT3 m_materialColor = { 0.90f, 0.75f, 0.65f };
+    bool m_prevGridMode = false;
+    float m_singleSphereScale = 1.0f;
+    float m_singleSphereScaleTarget = 1.0f;
+    int m_gridResolution = 7;
+    float m_gridSpacing = 2.6f;
+    float m_lightBrightness[3] = { 1.0f, 1.0f, 1.0f };
+    float m_lightBaseIntensity[3] = { 120.0f, 90.0f, 70.0f };
+    float m_lightRanges[3] = { 12.0f, 12.0f, 12.0f };
+    XMFLOAT3 m_lightPositions[3] =
+    {
+        XMFLOAT3(-2.0f, 1.0f, -2.0f),
+        XMFLOAT3(2.0f, 1.2f, -2.2f),
+        XMFLOAT3(0.0f, 2.4f, 1.0f)
+    };
+    XMFLOAT3 m_lightColors[3] =
+    {
+        XMFLOAT3(1.0f, 0.0f, 0.0f),
+        XMFLOAT3(0.0f, 0.0f, 1.0f),
+        XMFLOAT3(0.0f, 1.0f, 0.0f)
+    };
 
     ID3D11PixelShader* m_pPixelShader; //
+    ID3D11PixelShader* m_pLightMarkerPixelShader = nullptr;
     ID3D11VertexShader* m_pVertexShader; //
     ID3D11InputLayout* m_pInputLayout; //
+    ID3D11Buffer* m_pLightMarkerColorCB = nullptr;
+    ID3D11SamplerState* m_pSamplerState = nullptr;
+    ID3D11ShaderResourceView* m_pAlbedoTextureSRV = nullptr;
+    ID3D11ShaderResourceView* m_pNormalTextureSRV = nullptr;
+    ID3D11ShaderResourceView* m_pRoughnessTextureSRV = nullptr;
 
-    float m_CubeAngle = 0.0f;
+    ID3D11VertexShader* m_pSkyVertexShader = nullptr;
+    ID3D11PixelShader* m_pSkyPixelShader = nullptr;
+    ID3D11ShaderResourceView* m_pEnvironmentSRV = nullptr;
+    ID3D11RasterizerState* m_pSkyRasterState = nullptr;
+    ID3D11DepthStencilState* m_pSkyDepthState = nullptr;
+    ID3D11Texture2D* m_pSceneDepthTexture = nullptr;
+    ID3D11DepthStencilView* m_pSceneDepthView = nullptr;
+    std::vector<std::wstring> m_skyboxFiles;
 
     WCHAR* m_szTitle;
     WCHAR* m_szWindowClass;
