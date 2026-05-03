@@ -1,6 +1,7 @@
 #include "framework.h"
 #include "Sphere.h"
 
+#include <cmath>
 #include <vector>
 #include <cstdint>
 
@@ -81,6 +82,29 @@ HRESULT Sphere::InitModel(ID3D11Device* device)
             vertex.normal = { x / radius, y / radius, z / radius };
             // Match reference UV orientation for DDS textures.
             vertex.uv = { u, 1.0f - v };
+
+            // Tangent follows +U direction for lat-long sphere mapping.
+            // Poles use a fixed tangent so all pole fan triangles share one basis.
+            XMFLOAT3 tangent = (stack == 0 || stack == stacks)
+                ? XMFLOAT3{ 1.0f, 0.0f, 0.0f }
+                : XMFLOAT3{ -sinTheta, 0.0f, cosTheta };
+
+            XMVECTOR nVec = XMLoadFloat3(&vertex.normal);
+            XMVECTOR tVec = XMLoadFloat3(&tangent);
+            tVec = XMVectorSubtract(tVec, XMVectorScale(nVec, XMVectorGetX(XMVector3Dot(nVec, tVec))));
+            if (XMVectorGetX(XMVector3LengthSq(tVec)) < 1e-8f)
+            {
+                tVec = (fabsf(vertex.normal.z) > 0.999f)
+                    ? XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f)
+                    : XMVector3Normalize(XMVector3Cross(XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f), nVec));
+            }
+            tVec = XMVector3Normalize(tVec);
+            XMStoreFloat3(&vertex.tangent, tVec);
+
+            XMVECTOR bVec = XMVector3Cross(nVec, tVec);
+            bVec = XMVector3Normalize(bVec);
+            XMStoreFloat3(&vertex.bitangent, bVec);
+
             vertices.push_back(vertex);
         }
     }

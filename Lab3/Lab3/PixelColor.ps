@@ -89,31 +89,46 @@ float3 LightRadiance(PointLight L, float3 P)
 
 float3 CalculateNormalFromMap(
     float3 baseNormal,
-    float3 worldPos,
+    float3 tangentWInput,
+    float3 bitangentWInput,
     float2 texCoord,
     float normalStrength)
 {
-    // Build TBN from screen-space derivatives so normal mapping follows UVs
-    // and remains stable when the object rotates.
-    float3 dp1 = ddx(worldPos);
-    float3 dp2 = ddy(worldPos);
-    float2 duv1 = ddx(texCoord);
-    float2 duv2 = ddy(texCoord);
+    // Stable tangent frame from VS attributes
+    // This avoids screen-space derivative artifacts that depend on camera motion.
+    float3 tangentW = tangentWInput - baseNormal * dot(baseNormal, tangentWInput);
+    if (dot(tangentW, tangentW) < 1e-8f)
+    {
+        tangentW = (abs(baseNormal.z) > 0.999f)
+            ? float3(1.0f, 0.0f, 0.0f)
+            : normalize(cross(float3(0.0f, 0.0f, 1.0f), baseNormal));
+    }
+    tangentW = normalize(tangentW);
 
-    float3 dp2Perp = cross(dp2, baseNormal);
-    float3 dp1Perp = cross(baseNormal, dp1);
-    float3 tangentW = dp2Perp * duv1.x + dp1Perp * duv2.x;
-    float3 bitangentW = dp2Perp * duv1.y + dp1Perp * duv2.y;
+    float3 bitangentW = bitangentWInput - baseNormal * dot(baseNormal, bitangentWInput);
+    bitangentW = bitangentW - tangentW * dot(tangentW, bitangentW);
+    if (dot(bitangentW, bitangentW) < 1e-8f)
+        bitangentW = cross(baseNormal, tangentW);
+    bitangentW = normalize(bitangentW);
 
-    float tLen2 = dot(tangentW, tangentW);
-    float bLen2 = dot(bitangentW, bitangentW);
-    float invMax = rsqrt(max(max(tLen2, bLen2), EPS));
-    tangentW *= invMax;
-    bitangentW *= invMax;
+    // Keep mip derivatives stable across U wrap seams (sphere 0/1 meridian).
+    float2 duvDx = ddx(texCoord);
+    float2 duvDy = ddy(texCoord);
+    duvDx.x = duvDx.x - floor(duvDx.x + 0.5f);
+    duvDy.x = duvDy.x - floor(duvDy.x + 0.5f);
 
-    float3 mapNormal = normalTexture.Sample(samplerState, texCoord).xyz * 2.0f - 1.0f;
+    float3 mapNormal = normalTexture.SampleGrad(samplerState, texCoord, duvDx, duvDy).xyz * 2.0f - 1.0f;
     mapNormal.xy *= normalStrength;
-    mapNormal.z = sqrt(saturate(1.0f - dot(mapNormal.xy, mapNormal.xy)));
+
+    // Guard against over-length XY from BC compression/mips to avoid harsh dark sectors.
+    float xyLen2 = dot(mapNormal.xy, mapNormal.xy);
+    if (xyLen2 > 0.999f)
+    {
+        mapNormal.xy *= rsqrt(xyLen2) * 0.999f;
+        xyLen2 = dot(mapNormal.xy, mapNormal.xy);
+    }
+    mapNormal.z = sqrt(saturate(1.0f - xyLen2));
+    mapNormal = normalize(mapNormal);
 
     float3x3 TBN = float3x3(normalize(tangentW), normalize(bitangentW), normalize(baseNormal));
     return normalize(mul(mapNormal, TBN));
@@ -141,17 +156,51 @@ float4 main(PS_INPUT input) : SV_Target
     }
     float3 albedo = lerp(baseAlbedo, saturate(texAlbedo), useTex);
 
+    int debugMode = DebugMode;
+    float extendViews = step(0.5f, ExtendViews);
+
     float3 N = normalize(input.NormalW);
     if (step(0.5f, UseNormalMap) > 0.5f)
     {
-        N = CalculateNormalFromMap(N, input.WorldPos, input.TexCoord, max(NormalStrength, 0.0f));
+        N = CalculateNormalFromMap(
+            N,
+            input.TangentW,
+            input.BitangentW,
+            input.TexCoord,
+            max(NormalStrength, 0.0f)
+        );
+    }
+    if (debugMode == 6)
+    {
+        return float4(N * 0.5f + 0.5f, 1.0f);
+    }
+    if (debugMode == 7)
+    {
+        float3 Ngeo = normalize(input.NormalW);
+        float3 Tgeo = input.TangentW - Ngeo * dot(Ngeo, input.TangentW);
+        if (dot(Tgeo, Tgeo) < 1e-8f)
+        {
+            Tgeo = (abs(Ngeo.z) > 0.999f)
+                ? float3(1.0f, 0.0f, 0.0f)
+                : normalize(cross(float3(0.0f, 0.0f, 1.0f), Ngeo));
+        }
+        Tgeo = normalize(Tgeo);
+
+        float3 Bgeo = input.BitangentW - Ngeo * dot(Ngeo, input.BitangentW);
+        Bgeo = Bgeo - Tgeo * dot(Tgeo, Bgeo);
+        if (dot(Bgeo, Bgeo) < 1e-8f)
+            Bgeo = cross(Ngeo, Tgeo);
+        Bgeo = normalize(Bgeo);
+
+        float signValue = dot(cross(Ngeo, Tgeo), Bgeo);
+        float sign01 = saturate(0.5f + 0.5f * signValue);
+        return float4(sign01, 1.0f - sign01, 0.0f, 1.0f);
     }
     float3 V = normalize(CameraPos - input.WorldPos);
     float NdotV = saturate(dot(N, V));
+    float NdotVGeom = saturate(dot(normalize(input.NormalW), V));
 
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metalness);
-    int debugMode = DebugMode;
-    float extendViews = step(0.5f, ExtendViews);
 
     if (debugMode == 4)
     {
@@ -171,18 +220,22 @@ float4 main(PS_INPUT input) : SV_Target
         float3 L = Lvec / max(dist, EPS);
         float3 H = normalize(V + L);
 
+        if (debugMode == 5)
+        {
+            float simpleAtten = saturate(1.0f - dist / max(lights[i].Range, EPS));
+            // Light mask follows relief (normal map), but remains view-independent.
+            float NdotLMask = saturate(dot(N, L));
+            lightMask += lights[i].Color * (simpleAtten * NdotLMask);
+            continue;
+        }
+
         float NdotL = saturate(dot(N, L));
         float HdotV = saturate(dot(H, V));
 
-        if (NdotL > 0.0f && NdotV > 0.0f)
+        // Gate visibility by geometric normal to avoid camera-driven cutouts
+        // from highly perturbed normal-map vectors.
+        if (NdotL > 0.0f && NdotVGeom > 0.0f)
         {
-            if (debugMode == 5)
-            {
-                float simpleAtten = saturate(1.0f - dist / max(lights[i].Range, EPS));
-                lightMask += lights[i].Color * (simpleAtten * NdotL);
-                continue;
-            }
-
             float D = DistributionGGX(N, H, roughness);
             float G = GeometrySmith(N, V, L, roughness);
             float3 F = FresnelSchlick(HdotV, F0);

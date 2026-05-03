@@ -10,6 +10,8 @@ struct VS_INPUT
     float3 Pos : POSITION;
     float3 Normal : NORMAL;
     float2 TexCoord : TEXCOORD;
+    float3 Tangent : TANGENT;
+    float3 Bitangent : BINORMAL;
 };
 
 struct PS_INPUT
@@ -30,18 +32,22 @@ PS_INPUT main(VS_INPUT input)
     output.Pos = mul(worldPos, vp);
     float3 N = normalize(mul(input.Normal, (float3x3)Model));
     output.NormalW = N;
-    float3 tangent;
-    if (abs(N.z) > 0.999f)
+
+    float3 T = mul(input.Tangent, (float3x3)Model);
+    float3 B = mul(input.Bitangent, (float3x3)Model);
+
+    // Fallback for legacy meshes without explicit tangent data.
+    if (dot(T, T) < 1e-8f || dot(B, B) < 1e-8f)
     {
-        tangent = float3(1.0f, 0.0f, 0.0f);
+        if (abs(N.z) > 0.999f)
+            T = float3(1.0f, 0.0f, 0.0f);
+        else
+            T = normalize(cross(N, float3(0.0f, 0.0f, 1.0f)));
+        B = normalize(cross(N, T));
     }
-    else
-    {
-        tangent = normalize(cross(N, float3(0.0f, 0.0f, 1.0f)));
-    }
-    float3 bitangent = normalize(cross(N, tangent));
-    output.TangentW = tangent;
-    output.BitangentW = bitangent;
+
+    output.TangentW = normalize(T);
+    output.BitangentW = normalize(B);
     output.TexCoord = input.TexCoord;
     return output;
 }

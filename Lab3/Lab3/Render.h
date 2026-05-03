@@ -78,7 +78,9 @@ private:
         DebugView_Fresnel = 2,
         DebugView_Final = 3,
         DebugView_AlbedoOnly = 4,
-        DebugView_LightMask = 5
+        DebugView_LightMask = 5,
+        DebugView_NormalWS = 6,
+        DebugView_TBNSign = 7
     };
 
     HWND m_hWnd;

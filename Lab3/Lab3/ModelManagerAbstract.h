@@ -11,6 +11,8 @@ public:
         XMFLOAT3 xyz;
         XMFLOAT3 normal;
         XMFLOAT2 uv;
+        XMFLOAT3 tangent;
+        XMFLOAT3 bitangent;
     };
     DirectX::XMMATRIX GetModelMatrix() const { return m_modelMatrix; }
     ModelManagerAbstract(ID3D11DeviceContext* context);

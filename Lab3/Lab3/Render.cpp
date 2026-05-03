@@ -81,6 +81,8 @@ static const char* DebugModeToString(int mode)
     case 3: return "Final PBR";
     case 4: return "Albedo only";
     case 5: return "Light mask";
+    case 6: return "Normal WS";
+    case 7: return "TBN sign";
     default: return "Unknown";
     }
 }
@@ -271,8 +273,9 @@ void Render::DumpPipelineState(const char* reason)
     const int useTexture = (m_enableTextures && m_pAlbedoTextureSRV != nullptr) ? 1 : 0;
     const int useNormalMap = (m_enableNormalMap && m_pNormalTextureSRV != nullptr) ? 1 : 0;
     const int useRoughnessMap = (m_enableRoughnessMap && m_pRoughnessTextureSRV != nullptr) ? 1 : 0;
+    const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
     const int tonemapByMode = IsTonemapEnabled() ? 1 : 0;
-    const int tonemapEffective = (tonemapByMode && !m_forceCopyPostprocess) ? 1 : 0;
+    const int tonemapEffective = (tonemapByMode && !forceCopyEffective) ? 1 : 0;
     const int materialIndex = (m_materialPresetIndex >= 0 && m_materialPresetIndex < (int)IM_ARRAYSIZE(kMaterialPresets))
         ? m_materialPresetIndex
         : 0;
@@ -286,8 +289,8 @@ void Render::DumpPipelineState(const char* reason)
         m_enableRoughnessMap ? 1 : 0, useRoughnessMap, m_roughnessMapStrength);
     DebugLogA("[LAB3][DIAG] labUiMode=%d\n", m_labUiMode ? 1 : 0);
     DebugLogA("[LAB3][DIAG] extendViews=%d\n", m_extendViews ? 1 : 0);
-    DebugLogA("[LAB3][DIAG] postprocess: tonemapByMode=%d forceCopy=%d tonemapEffective=%d\n",
-        tonemapByMode, m_forceCopyPostprocess ? 1 : 0, tonemapEffective);
+    DebugLogA("[LAB3][DIAG] postprocess: tonemapByMode=%d forceCopyRaw=%d forceCopyEffective=%d tonemapEffective=%d\n",
+        tonemapByMode, m_forceCopyPostprocess ? 1 : 0, forceCopyEffective ? 1 : 0, tonemapEffective);
     DebugLogA("[LAB3][DIAG] resources: albedoSRV=%p normalSRV=%p roughSRV=%p envSRV=%p sampler=%p depthDSV=%p depthTex=%p\n",
         m_pAlbedoTextureSRV, m_pNormalTextureSRV, m_pRoughnessTextureSRV, m_pEnvironmentSRV, m_pSamplerState, m_pSceneDepthView, m_pSceneDepthTexture);
     DebugLogA("[LAB3][DIAG] skyboxSelection=%ls\n", GetSelectedSkyboxRelativePath().c_str());
@@ -535,10 +538,18 @@ HRESULT Render::InitBufferShader()
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(ModelManagerAbstract::Vertex, xyz),    D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(ModelManagerAbstract::Vertex, normal), D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(ModelManagerAbstract::Vertex, uv),     D3D11_INPUT_PER_VERTEX_DATA, 0 }
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(ModelManagerAbstract::Vertex, uv),     D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TANGENT",  0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(ModelManagerAbstract::Vertex, tangent), D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "BINORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(ModelManagerAbstract::Vertex, bitangent), D3D11_INPUT_PER_VERTEX_DATA, 0 }
     };
 
-    hr = m_pDevice->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_pInputLayout);
+    hr = m_pDevice->CreateInputLayout(
+        layout,
+        ARRAYSIZE(layout),
+        vsBlob->GetBufferPointer(),
+        vsBlob->GetBufferSize(),
+        &m_pInputLayout
+    );
     vsBlob->Release();
     psBlob->Release();
 
@@ -993,8 +1004,17 @@ void Render::RenderImGui()
     if (ImGui::GetCurrentContext() == nullptr)
         return;
 
+    if (!m_labUiMode && m_forceCopyPostprocess)
+    {
+        // In lab mode off, force-copy is unavailable and should not affect rendering.
+        m_forceCopyPostprocess = false;
+    }
+
     if (!m_labUiMode &&
-        (m_debugViewMode == DebugView_AlbedoOnly || m_debugViewMode == DebugView_LightMask))
+        (m_debugViewMode == DebugView_AlbedoOnly ||
+         m_debugViewMode == DebugView_LightMask ||
+         m_debugViewMode == DebugView_NormalWS ||
+         m_debugViewMode == DebugView_TBNSign))
     {
         m_debugViewMode = DebugView_Final;
     }
@@ -1015,7 +1035,10 @@ void Render::RenderImGui()
         (m_debugViewMode == DebugView_Fresnel);
 
     const bool isFinalView = (m_debugViewMode == DebugView_Final);
-    const bool lightAffectsCurrentView = (m_debugViewMode != DebugView_AlbedoOnly);
+    const bool lightAffectsCurrentView =
+        (m_debugViewMode != DebugView_AlbedoOnly) &&
+        (m_debugViewMode != DebugView_NormalWS) &&
+        (m_debugViewMode != DebugView_TBNSign);
     const int materialIndex = (m_materialPresetIndex >= 0 && m_materialPresetIndex < (int)IM_ARRAYSIZE(kMaterialPresets))
         ? m_materialPresetIndex
         : 0;
@@ -1037,21 +1060,21 @@ void Render::RenderImGui()
         ImGui::BeginDisabled(true);
 
     ImGui::ColorEdit3("Color", &m_lightColors[selectedLight].x);
-    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect 'Albedo only' view.");
+    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect this debug view.");
     ImGui::SliderFloat("Intensity", &m_lightBrightness[selectedLight], 0.0f, 6.0f);
-    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect 'Albedo only' view.");
+    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect this debug view.");
     if (m_labUiMode)
     {
         ImGui::SliderFloat("Range", &m_lightRanges[selectedLight], 1.0f, 30.0f);
-        if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect 'Albedo only' view.");
+        if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect this debug view.");
     }
     ImGui::DragFloat3("Position", &m_lightPositions[selectedLight].x, 0.05f, -20.0f, 20.0f);
-    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect 'Albedo only' view.");
+    if (!lightAffectsCurrentView) showDisabledHint("Lights do not affect this debug view.");
 
     if (!lightAffectsCurrentView)
     {
         ImGui::EndDisabled();
-        ImGui::TextDisabled("Light controls are inactive in 'Albedo only' mode.");
+        ImGui::TextDisabled("Light controls are inactive in current debug view.");
     }
 
     if (m_labUiMode)
@@ -1242,7 +1265,9 @@ void Render::RenderImGui()
             "Geometry",
             "Fresnel",
             "Albedo only",
-            "Light mask"
+            "Light mask",
+            "Normal WS",
+            "TBN sign"
         };
         switch (m_debugViewMode)
         {
@@ -1251,6 +1276,8 @@ void Render::RenderImGui()
         case DebugView_Fresnel: uiMode = 3; break;
         case DebugView_AlbedoOnly: uiMode = 4; break;
         case DebugView_LightMask: uiMode = 5; break;
+        case DebugView_NormalWS: uiMode = 6; break;
+        case DebugView_TBNSign: uiMode = 7; break;
         default: uiMode = 0; break;
         }
 
@@ -1263,6 +1290,8 @@ void Render::RenderImGui()
             case 3: m_debugViewMode = DebugView_Fresnel; break;
             case 4: m_debugViewMode = DebugView_AlbedoOnly; break;
             case 5: m_debugViewMode = DebugView_LightMask; break;
+            case 6: m_debugViewMode = DebugView_NormalWS; break;
+            case 7: m_debugViewMode = DebugView_TBNSign; break;
             default: m_debugViewMode = DebugView_Final; break;
             }
         }
@@ -1319,7 +1348,8 @@ void Render::RenderImGui()
         ImGui::Text("UseTexture in shader: %d", useTexture);
         ImGui::Text("UseNormalMap in shader: %d", useNormalMap);
         ImGui::Text("UseRoughnessMap in shader: %d", useRoughnessMap);
-        ImGui::Text("Tonemap effective: %s", (IsTonemapEnabled() && !m_forceCopyPostprocess) ? "yes" : "no");
+        const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
+        ImGui::Text("Tonemap effective: %s", (IsTonemapEnabled() && !forceCopyEffective) ? "yes" : "no");
         if (ImGui::Button("Dump diagnostics to Output"))
         {
             m_requestDiagnosticsDump = true;
@@ -1445,7 +1475,12 @@ void Render::UpdateCamera(WPARAM wParam, LPARAM lParam) {
         case '6': m_enableTextures = !m_enableTextures; break;
         case '7': m_enableSkybox = !m_enableSkybox; break;
         case '8': m_requestDiagnosticsDump = true; break;
-        case '9': m_forceCopyPostprocess = !m_forceCopyPostprocess; break;
+        case '9':
+            if (m_labUiMode)
+                m_forceCopyPostprocess = !m_forceCopyPostprocess;
+            else
+                m_forceCopyPostprocess = false;
+            break;
 
         case 'R':
             m_materialRoughness += 0.05f;
@@ -1604,7 +1639,8 @@ void Render::RenderStart()
     if (m_pAnnotation) m_pAnnotation->EndEvent();
     m_pDeviceContext->PSSetShaderResources(0, 3, nullSRVs);
 
-    const bool useTonemap = IsTonemapEnabled() && !m_forceCopyPostprocess;
+    const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
+    const bool useTonemap = IsTonemapEnabled() && !forceCopyEffective;
     if (useTonemap)
     {
         m_PostProcessingPass->applyTonemapEffect(m_pDevice, m_pDeviceContext, m_pAnnotation, m_pRenderedSceneTexture, m_pPostProcessedTexture);
