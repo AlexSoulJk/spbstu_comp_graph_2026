@@ -1,0 +1,11 @@
+Model Information:
+* title:	The Wanderer's Lightsaber
+* source:	https://sketchfab.com/3d-models/the-wanderers-lightsaber-f5acd77ecccf4d27a5db96f07b5120e9
+* author:	DMC_RELAX (https://sketchfab.com/WhamGallion)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "The Wanderer's Lightsaber" (https://sketchfab.com/3d-models/the-wanderers-lightsaber-f5acd77ecccf4d27a5db96f07b5120e9) by DMC_RELAX (https://sketchfab.com/WhamGallion) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

@@ -1,0 +1,48 @@
+TextureCube environmentMap : register(t0);
+SamplerState samplerState : register(s0);
+
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;
+    float3 Dir : TEXCOORD0;
+};
+
+static const float PI = 3.14159265359f;
+// Smaller step -> more hemisphere samples -> smoother diffuse IBL.
+// 0.015 is a quality-focused value; map is recomputed only on environment change.
+static const float IRRADIANCE_SAMPLE_DELTA = 0.0075f;
+
+float4 main(VS_OUTPUT input) : SV_Target
+{
+    float3 N = normalize(input.Dir);
+    float3 up = (abs(N.y) < 0.999f) ? float3(0.0f, 1.0f, 0.0f) : float3(0.0f, 0.0f, 1.0f);
+    float3 right = normalize(cross(up, N));
+    up = normalize(cross(N, right));
+
+    float nrSamples = 0.0f;
+    float3 irradiance = float3(0.0f, 0.0f, 0.0f);
+
+    for (float phi = 0.0f; phi < 2.0f * PI; phi += IRRADIANCE_SAMPLE_DELTA)
+    {
+        for (float theta = 0.0f; theta < 0.5f * PI; theta += IRRADIANCE_SAMPLE_DELTA)
+        {
+            float3 tangentSample = float3(
+                sin(theta) * cos(phi),
+                sin(theta) * sin(phi),
+                cos(theta)
+            );
+            float3 sampleVec =
+                tangentSample.x * right +
+                tangentSample.y * up +
+                tangentSample.z * N;
+
+            float cosTheta = cos(theta);
+            float sinTheta = sin(theta);
+            irradiance += environmentMap.SampleLevel(samplerState, normalize(sampleVec), 0).rgb * cosTheta * sinTheta;
+            nrSamples += 1.0f;
+        }
+    }
+
+    irradiance = PI * irradiance / max(nrSamples, 1.0f);
+    return float4(irradiance, 1.0f);
+}

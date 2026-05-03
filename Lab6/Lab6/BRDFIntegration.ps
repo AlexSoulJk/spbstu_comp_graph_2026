@@ -1,0 +1,141 @@
+static const float PI = 3.14159265359f;
+static const float EPS = 1e-5f;
+static const uint SAMPLE_COUNT = 1024u;
+
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;
+    float2 TexCoord : TEXCOORD0;
+};
+
+struct BasisFrame
+{
+    float3 Tangent;
+    float3 Bitangent;
+    float3 Normal;
+};
+
+struct BrdfAccum
+{
+    float A;
+    float B;
+};
+
+float RadicalInverse_VdC(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10f;
+}
+
+float2 Hammersley(uint i, uint N)
+{
+    return float2((float)i / (float)N, RadicalInverse_VdC(i));
+}
+
+BasisFrame BuildBasisFrame(float3 N)
+{
+    BasisFrame frame;
+    frame.Normal = normalize(N);
+    float3 up = abs(frame.Normal.z) < 0.999f ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
+    frame.Tangent = normalize(cross(up, frame.Normal));
+    frame.Bitangent = cross(frame.Normal, frame.Tangent);
+    return frame;
+}
+
+float3 GGXHalfVectorLocal(float2 Xi, float roughness)
+{
+    float a = roughness * roughness;
+    float phi = 2.0f * PI * Xi.x;
+    float cosTheta = sqrt((1.0f - Xi.y) / (1.0f + (a * a - 1.0f) * Xi.y));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+float3 FromLocalToWorld(float3 localDir, BasisFrame frame)
+{
+    return normalize(
+        frame.Tangent * localDir.x +
+        frame.Bitangent * localDir.y +
+        frame.Normal * localDir.z
+    );
+}
+
+float GeometrySchlickGGX_IBL(float NdotV, float roughness)
+{
+    float a = roughness;
+    float k = (a * a) * 0.5f;
+    return NdotV / max(NdotV * (1.0f - k) + k, EPS);
+}
+
+float GeometrySmith_IBL(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = saturate(dot(N, V));
+    float NdotL = saturate(dot(N, L));
+    float ggx1 = GeometrySchlickGGX_IBL(NdotV, roughness);
+    float ggx2 = GeometrySchlickGGX_IBL(NdotL, roughness);
+    return ggx1 * ggx2;
+}
+
+float3 BuildViewVector(float NdotV)
+{
+    float3 V;
+    V.x = sqrt(saturate(1.0f - NdotV * NdotV));
+    V.y = 0.0f;
+    V.z = NdotV;
+    return V;
+}
+
+float2 EvaluateSplitSumSample(float3 N, float3 V, float3 H, float3 L, float roughness, float NdotV)
+{
+    float G = GeometrySmith_IBL(N, V, L, roughness);
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+    float G_Vis = (G * VdotH) / max(NdotH * NdotV, EPS);
+    float Fc = pow(1.0f - VdotH, 5.0f);
+    return float2((1.0f - Fc) * G_Vis, Fc * G_Vis);
+}
+
+BrdfAccum IntegrateBRDF(float NdotV, float roughness)
+{
+    BrdfAccum accum;
+    accum.A = 0.0f;
+    accum.B = 0.0f;
+
+    float3 V = BuildViewVector(NdotV);
+    float3 N = float3(0.0f, 0.0f, 1.0f);
+    BasisFrame frame = BuildBasisFrame(N);
+
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        float3 Hlocal = GGXHalfVectorLocal(Xi, roughness);
+        float3 H = FromLocalToWorld(Hlocal, frame);
+        float3 L = normalize(2.0f * dot(V, H) * H - V);
+
+        float NdotL = saturate(L.z);
+        if (NdotL > 0.0f)
+        {
+            float2 weights = EvaluateSplitSumSample(N, V, H, L, roughness, NdotV);
+            accum.A += weights.x;
+            accum.B += weights.y;
+        }
+    }
+
+    float invCount = rcp((float)SAMPLE_COUNT);
+    accum.A *= invCount;
+    accum.B *= invCount;
+    return accum;
+}
+
+float4 main(VS_OUTPUT input) : SV_Target
+{
+    float NdotV = saturate(input.TexCoord.x);
+    float roughness = saturate(input.TexCoord.y);
+    BrdfAccum brdf = IntegrateBRDF(NdotV, roughness);
+    return float4(brdf.A, brdf.B, 0.0f, 1.0f);
+}

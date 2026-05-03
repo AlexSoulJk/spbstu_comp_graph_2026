@@ -1,0 +1,162 @@
+TextureCube environmentMap : register(t0);
+SamplerState samplerState : register(s0);
+
+cbuffer SpecularPrefilterCB : register(b4)
+{
+    float4 Params; // x = roughness, y = sourceMipCount
+};
+
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;
+    float3 Dir : TEXCOORD0;
+};
+
+static const float PI = 3.14159265359f;
+static const float EPS = 1e-4f;
+static const uint SAMPLE_COUNT = 1024u;
+
+struct OrthonormalBasis
+{
+    float3 Tangent;
+    float3 Bitangent;
+    float3 Normal;
+};
+
+struct PrefilterSample
+{
+    float3 L;
+    float NdotL;
+    float MipLevel;
+};
+
+float RadicalInverse_VdC(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10f;
+}
+
+float2 Hammersley(uint i, uint N)
+{
+    return float2((float)i / (float)N, RadicalInverse_VdC(i));
+}
+
+OrthonormalBasis BuildOrthonormalBasis(float3 N)
+{
+    OrthonormalBasis basis;
+    basis.Normal = normalize(N);
+
+    float3 axis = abs(basis.Normal.z) < 0.999f
+        ? float3(0.0f, 0.0f, 1.0f)
+        : float3(1.0f, 0.0f, 0.0f);
+
+    basis.Tangent = normalize(cross(axis, basis.Normal));
+    basis.Bitangent = cross(basis.Normal, basis.Tangent);
+    return basis;
+}
+
+float3 GGXHalfVectorLocal(float2 Xi, float roughness)
+{
+    float a = roughness * roughness;
+
+    float phi = 2.0f * PI * Xi.x;
+    float cosTheta = sqrt((1.0f - Xi.y) / (1.0f + (a * a - 1.0f) * Xi.y));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
+}
+
+float3 TransformLocalToWorld(float3 localDir, OrthonormalBasis basis)
+{
+    return normalize(
+        basis.Tangent * localDir.x +
+        basis.Bitangent * localDir.y +
+        basis.Normal * localDir.z
+    );
+}
+
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = saturate(dot(N, H));
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (a2 - 1.0f) + 1.0f;
+    return a2 / max(PI * denom * denom, EPS);
+}
+
+float ComputePdf(float3 N, float3 H, float3 V, float roughness)
+{
+    float D = DistributionGGX(N, H, roughness);
+    float NdotH = saturate(dot(N, H));
+    float HdotV = saturate(dot(H, V));
+    return max(D * NdotH / max(4.0f * HdotV, EPS), EPS);
+}
+
+float ComputeTexelSolidAngle(float sourceMipCount)
+{
+    float baseResolution = exp2(max(sourceMipCount - 1.0f, 0.0f));
+    return 4.0f * PI / (6.0f * baseResolution * baseResolution);
+}
+
+float ComputeSampleMip(float roughness, float sourceMipCount, float pdf, uint sampleCount)
+{
+    float saTexel = ComputeTexelSolidAngle(sourceMipCount);
+    float saSample = 1.0f / (float(sampleCount) * pdf + EPS);
+
+    float mipLevel = (roughness <= 0.0f) ? 0.0f : 0.5f * log2(saSample / saTexel);
+    return clamp(mipLevel, 0.0f, sourceMipCount - 1.0f);
+}
+
+PrefilterSample BuildPrefilterSample(float2 Xi, float3 N, float3 V, float roughness, float sourceMipCount)
+{
+    PrefilterSample sample;
+    sample.L = float3(0.0f, 0.0f, 0.0f);
+    sample.NdotL = 0.0f;
+    sample.MipLevel = 0.0f;
+
+    OrthonormalBasis basis = BuildOrthonormalBasis(N);
+    float3 Hlocal = GGXHalfVectorLocal(Xi, roughness);
+    float3 H = TransformLocalToWorld(Hlocal, basis);
+    float3 L = normalize(2.0f * dot(V, H) * H - V);
+
+    float NdotL = saturate(dot(N, L));
+    if (NdotL <= 0.0f)
+        return sample;
+
+    float pdf = ComputePdf(N, H, V, roughness);
+    sample.L = L;
+    sample.NdotL = NdotL;
+    sample.MipLevel = ComputeSampleMip(roughness, sourceMipCount, pdf, SAMPLE_COUNT);
+    return sample;
+}
+
+float4 main(VS_OUTPUT input) : SV_Target
+{
+    float roughness = saturate(Params.x);
+    float sourceMipCount = max(Params.y, 1.0f);
+
+    float3 N = normalize(input.Dir);
+    float3 V = N;
+
+    float3 prefilteredColor = float3(0.0f, 0.0f, 0.0f);
+    float totalWeight = 0.0f;
+
+    for (uint i = 0u; i < SAMPLE_COUNT; ++i)
+    {
+        float2 Xi = Hammersley(i, SAMPLE_COUNT);
+        PrefilterSample sample = BuildPrefilterSample(Xi, N, V, roughness, sourceMipCount);
+        if (sample.NdotL <= 0.0f)
+            continue;
+
+        prefilteredColor += environmentMap.SampleLevel(samplerState, sample.L, sample.MipLevel).rgb * sample.NdotL;
+        totalWeight += sample.NdotL;
+    }
+
+    prefilteredColor /= max(totalWeight, EPS);
+    return float4(prefilteredColor, 1.0f);
+}

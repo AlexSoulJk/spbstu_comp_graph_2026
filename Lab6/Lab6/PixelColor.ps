@@ -1,0 +1,328 @@
+Texture2D diffuseTexture : register(t0);
+Texture2D normalTexture : register(t1);
+Texture2D roughnessTexture : register(t2);
+TextureCube irradianceMap : register(t3);
+TextureCube prefilteredEnvMap : register(t4);
+Texture2D brdfLUT : register(t5);
+SamplerState samplerState : register(s0);
+
+cbuffer SceneCB : register(b2)
+{
+    struct PointLight
+    {
+        float3 Position;
+        float Range;
+        float3 Color;
+        float Intensity;
+    };
+
+    PointLight lights[3];
+
+    float3 CameraPos;
+    float AO;
+
+    float3 Albedo;
+    float Roughness;
+
+    float Metalness;
+    int DebugMode;
+    float UseTexture;
+    float ExtendViews;
+    float UseNormalMap;
+    float NormalStrength;
+    float UseRoughnessMap;
+    float RoughnessMapStrength;
+    float UseDiffuseIBL;
+    float IBLIntensity;
+    float UseSpecularIBL;
+    float SpecularIBLIntensity;
+};
+
+struct PS_INPUT
+{
+    float4 Pos : SV_POSITION;
+    float3 WorldPos : TEXCOORD0;
+    float3 NormalW : TEXCOORD1;
+    float2 TexCoord : TEXCOORD2;
+    float3 TangentW : TEXCOORD3;
+    float3 BitangentW : TEXCOORD4;
+};
+
+static const float PI = 3.14159265f;
+static const float EPS = 1e-4f;
+static const float MIN_ROUGHNESS = 0.045f;
+
+float DistributionGGX(float3 N, float3 H, float roughness)
+{
+    float a = max(roughness * roughness, EPS);
+    float a2 = a * a;
+    float NdotH = clamp(dot(N, H), 0.0f, 1.0f);
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = NdotH2 * (a2 - 1.0f) + 1.0f;
+    return a2 / max(PI * denom * denom, EPS);
+}
+
+float GeometrySchlickGGX(float NdotX, float roughness)
+{
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
+    return NdotX / max(NdotX * (1.0f - k) + k, EPS);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = clamp(dot(N, V), 0.0f, 1.0f);
+    float NdotL = clamp(dot(N, L), 0.0f, 1.0f);
+    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
+}
+
+float3 FresnelSchlick(float cosTheta, float3 F0)
+{
+    float ct = clamp(cosTheta, 0.0f, 1.0f);
+    return F0 + (1.0f - F0) * pow(1.0f - ct, 5.0f);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    float ct = clamp(cosTheta, 0.0f, 1.0f);
+    float3 oneMinusR = float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness);
+    return F0 + (max(oneMinusR, F0) - F0) * pow(1.0f - ct, 5.0f);
+}
+
+float3 LightRadiance(PointLight L, float3 P)
+{
+    float3 Lvec = L.Position - P;
+    float dist = length(Lvec);
+    float invDist2 = 1.0f / max(dist * dist, EPS);
+    float nd = dist / max(L.Range, EPS);
+    float rangeFade = saturate(1.0f - nd * nd * nd * nd);
+    float attenuation = invDist2 * rangeFade * rangeFade;
+    return L.Color * (L.Intensity * attenuation);
+}
+
+float3 CalculateNormalFromMap(
+    float3 baseNormal,
+    float3 tangentWInput,
+    float3 bitangentWInput,
+    float2 texCoord,
+    float normalStrength)
+{
+    // Stable tangent frame from VS attributes
+    // This avoids screen-space derivative artifacts that depend on camera motion.
+    float3 tangentW = tangentWInput - baseNormal * dot(baseNormal, tangentWInput);
+    if (dot(tangentW, tangentW) < 1e-8f)
+    {
+        tangentW = (abs(baseNormal.z) > 0.999f)
+            ? float3(1.0f, 0.0f, 0.0f)
+            : normalize(cross(float3(0.0f, 0.0f, 1.0f), baseNormal));
+    }
+    tangentW = normalize(tangentW);
+
+    float3 bitangentW = bitangentWInput - baseNormal * dot(baseNormal, bitangentWInput);
+    bitangentW = bitangentW - tangentW * dot(tangentW, bitangentW);
+    if (dot(bitangentW, bitangentW) < 1e-8f)
+        bitangentW = cross(baseNormal, tangentW);
+    bitangentW = normalize(bitangentW);
+
+    // Keep mip derivatives stable across U wrap seams (sphere 0/1 meridian).
+    float2 duvDx = ddx(texCoord);
+    float2 duvDy = ddy(texCoord);
+    duvDx.x = duvDx.x - floor(duvDx.x + 0.5f);
+    duvDy.x = duvDy.x - floor(duvDy.x + 0.5f);
+
+    float3 mapNormal = normalTexture.SampleGrad(samplerState, texCoord, duvDx, duvDy).xyz * 2.0f - 1.0f;
+    mapNormal.xy *= normalStrength;
+
+    // Guard against over-length XY from BC compression/mips to avoid harsh dark sectors.
+    float xyLen2 = dot(mapNormal.xy, mapNormal.xy);
+    if (xyLen2 > 0.999f)
+    {
+        mapNormal.xy *= rsqrt(xyLen2) * 0.999f;
+        xyLen2 = dot(mapNormal.xy, mapNormal.xy);
+    }
+    mapNormal.z = sqrt(saturate(1.0f - xyLen2));
+    mapNormal = normalize(mapNormal);
+
+    float3x3 TBN = float3x3(normalize(tangentW), normalize(bitangentW), normalize(baseNormal));
+    return normalize(mul(mapNormal, TBN));
+}
+
+float4 main(PS_INPUT input) : SV_Target
+{
+    float roughnessBase = saturate(Roughness);
+    float roughnessTex = roughnessBase;
+    if (step(0.5f, UseRoughnessMap) > 0.5f)
+    {
+        roughnessTex = roughnessTexture.Sample(samplerState, input.TexCoord).r;
+    }
+    float roughness = max(
+        saturate(lerp(roughnessBase, saturate(roughnessTex), saturate(RoughnessMapStrength))),
+        MIN_ROUGHNESS
+    );
+    float metalness = saturate(Metalness);
+    float3 baseAlbedo = saturate(Albedo);
+    float useTex = step(0.5f, UseTexture);
+    float3 texAlbedo = baseAlbedo;
+    if (useTex > 0.5f)
+    {
+        texAlbedo = diffuseTexture.Sample(samplerState, input.TexCoord).rgb;
+    }
+    float3 albedo = lerp(baseAlbedo, saturate(texAlbedo), useTex);
+
+    int debugMode = DebugMode;
+    float extendViews = step(0.5f, ExtendViews);
+
+    float3 N = normalize(input.NormalW);
+    if (step(0.5f, UseNormalMap) > 0.5f)
+    {
+        N = CalculateNormalFromMap(
+            N,
+            input.TangentW,
+            input.BitangentW,
+            input.TexCoord,
+            max(NormalStrength, 0.0f)
+        );
+    }
+    if (debugMode == 6)
+    {
+        return float4(N * 0.5f + 0.5f, 1.0f);
+    }
+    if (debugMode == 7)
+    {
+        float3 Ngeo = normalize(input.NormalW);
+        float3 Tgeo = input.TangentW - Ngeo * dot(Ngeo, input.TangentW);
+        if (dot(Tgeo, Tgeo) < 1e-8f)
+        {
+            Tgeo = (abs(Ngeo.z) > 0.999f)
+                ? float3(1.0f, 0.0f, 0.0f)
+                : normalize(cross(float3(0.0f, 0.0f, 1.0f), Ngeo));
+        }
+        Tgeo = normalize(Tgeo);
+
+        float3 Bgeo = input.BitangentW - Ngeo * dot(Ngeo, input.BitangentW);
+        Bgeo = Bgeo - Tgeo * dot(Tgeo, Bgeo);
+        if (dot(Bgeo, Bgeo) < 1e-8f)
+            Bgeo = cross(Ngeo, Tgeo);
+        Bgeo = normalize(Bgeo);
+
+        float signValue = dot(cross(Ngeo, Tgeo), Bgeo);
+        float sign01 = saturate(0.5f + 0.5f * signValue);
+        return float4(sign01, 1.0f - sign01, 0.0f, 1.0f);
+    }
+    float3 V = normalize(CameraPos - input.WorldPos);
+    float NdotV = saturate(dot(N, V));
+    float NdotVGeom = saturate(dot(normalize(input.NormalW), V));
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metalness);
+
+    if (debugMode == 4)
+    {
+        return float4(albedo, 1.0f);
+    }
+
+    float3 Lo = float3(0.0f, 0.0f, 0.0f);
+    float3 debugAccum = float3(0.0f, 0.0f, 0.0f);
+    int debugCount = 0;
+    float3 lightMask = float3(0.0f, 0.0f, 0.0f);
+
+    [unroll]
+    for (int i = 0; i < 3; ++i)
+    {
+        float3 Lvec = lights[i].Position - input.WorldPos;
+        float dist = length(Lvec);
+        float3 L = Lvec / max(dist, EPS);
+        float3 H = normalize(V + L);
+
+        if (debugMode == 5)
+        {
+            float simpleAtten = saturate(1.0f - dist / max(lights[i].Range, EPS));
+            // Light mask follows relief (normal map), but remains view-independent.
+            float NdotLMask = saturate(dot(N, L));
+            lightMask += lights[i].Color * (simpleAtten * NdotLMask);
+            continue;
+        }
+
+        float NdotL = saturate(dot(N, L));
+        float HdotV = saturate(dot(H, V));
+
+        // Gate visibility by geometric normal to avoid camera-driven cutouts
+        // from highly perturbed normal-map vectors.
+        if (NdotL > 0.0f && NdotVGeom > 0.0f)
+        {
+            float D = DistributionGGX(N, H, roughness);
+            float G = GeometrySmith(N, V, L, roughness);
+            float3 F = FresnelSchlick(HdotV, F0);
+            float3 radiance = LightRadiance(lights[i], input.WorldPos);
+
+            if (debugMode == 0)
+            {
+                debugAccum += D.xxx * radiance * NdotL;
+                debugCount++;
+                continue;
+            }
+            if (debugMode == 1)
+            {
+                debugAccum += G.xxx * radiance * NdotL;
+                debugCount++;
+                continue;
+            }
+            if (debugMode == 2)
+            {
+                debugAccum += F * radiance * NdotL;
+                debugCount++;
+                continue;
+            }
+
+            float3 numerator = D * G * F;
+            float denominator = max(4.0f * NdotV * NdotL, EPS);
+            float3 specular = numerator / denominator;
+
+            float3 kS = F;
+            float3 kD = (1.0f - kS) * (1.0f - metalness);
+            Lo += (kD * albedo / PI + specular) * radiance * NdotL;
+        }
+    }
+
+    if (debugMode == 5)
+    {
+        return float4(saturate(lightMask), 1.0f);
+    }
+    if (debugMode == 0 || debugMode == 1 || debugMode == 2)
+    {
+        float invCount = (debugCount > 0) ? (1.0f / debugCount) : 1.0f;
+        float3 debugColor = saturate(debugAccum * invCount);
+        if (extendViews > 0.5f)
+        {
+            // Extended view keeps BRDF debug readable while preserving texture context.
+            float luminance = dot(debugColor, float3(0.299f, 0.587f, 0.114f));
+            float3 texturedDebug = albedo * (0.35f + 0.65f * saturate(luminance * 1.4f));
+            debugColor = saturate(lerp(debugColor, texturedDebug, 0.6f));
+        }
+        return float4(debugColor, 1.0f);
+    }
+
+    float useDiffuseIBL = step(0.5f, UseDiffuseIBL);
+    float useSpecularIBL = step(0.5f, UseSpecularIBL);
+
+    float3 Fview = FresnelSchlickRoughness(NdotV, F0, roughness);
+    float3 kSView = Fview;
+    float3 kDView = (1.0f - kSView) * (1.0f - metalness);
+
+    float3 irradiance = irradianceMap.Sample(samplerState, N).rgb;
+    float3 diffuseIBL = kDView * irradiance * albedo * AO * max(IBLIntensity, 0.0f);
+
+    const float MAX_REFLECTION_LOD = 4.0f;
+    float3 R = reflect(-V, N);
+    float3 prefilteredColor = prefilteredEnvMap.SampleLevel(samplerState, R, roughness * MAX_REFLECTION_LOD).rgb;
+    float2 envBRDF = brdfLUT.Sample(samplerState, float2(NdotV, roughness)).rg;
+    float3 specularIBL = prefilteredColor * (Fview * envBRDF.x + envBRDF.y) * max(SpecularIBLIntensity, 0.0f);
+
+    float3 ambientIBL = diffuseIBL * useDiffuseIBL + specularIBL * useSpecularIBL;
+    float useAnyIBL = saturate(useDiffuseIBL + useSpecularIBL);
+    float3 ambientFallback = 0.06f * albedo * AO;
+    float3 ambient = lerp(ambientFallback, ambientIBL, useAnyIBL);
+    float3 color = ambient + Lo;
+
+    return float4(max(color, 0.0f), 1.0f);
+}

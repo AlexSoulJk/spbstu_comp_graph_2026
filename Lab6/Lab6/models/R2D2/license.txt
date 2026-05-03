@@ -1,0 +1,11 @@
+Model Information:
+* title:	R2D2
+* source:	https://sketchfab.com/3d-models/r2d2-7719d93e76ca40a5a8774f5530a7aecf
+* author:	jesuskrisis (https://sketchfab.com/jesuskrisis)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "R2D2" (https://sketchfab.com/3d-models/r2d2-7719d93e76ca40a5a8774f5530a7aecf) by jesuskrisis (https://sketchfab.com/jesuskrisis) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
