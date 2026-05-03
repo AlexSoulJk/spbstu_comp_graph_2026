@@ -71,6 +71,7 @@ private:
     HRESULT LoadHDRTexture2D(const std::wstring& fullPath, ID3D11ShaderResourceView** outSRV);
     HRESULT ConvertHDRIToCubemap(ID3D11ShaderResourceView* equirectSRV, UINT cubeSize, ID3D11ShaderResourceView** outCubeSRV);
     HRESULT ConvolveCubemapToIrradiance(ID3D11ShaderResourceView* environmentCubeSRV, UINT irradianceSize, ID3D11ShaderResourceView** outIrradianceSRV);
+    HRESULT RebuildIrradianceFromEnvironment();
     bool TryGetCachedHdriCubemap(const std::wstring& keyLower, ID3D11ShaderResourceView** outSRV) const;
     void PutCachedHdriCubemap(const std::wstring& keyLower, ID3D11ShaderResourceView* cubeSRV);
     std::wstring ResolveFirstExistingPath(const std::wstring& relativePath) const;
@@ -115,6 +116,8 @@ private:
     float m_normalStrength = 1.0f;
     float m_roughnessMapStrength = 1.0f;
     float m_iblIntensity = 1.0f;
+    int m_irradianceMapSize = 32;
+    int m_labAmbientSourceMode = 0; // 0 = Irradiance, 1 = Constant
     int m_materialPresetIndex = 1;
     int m_skyboxFileIndex = 0;
     bool m_requestDiagnosticsDump = false;

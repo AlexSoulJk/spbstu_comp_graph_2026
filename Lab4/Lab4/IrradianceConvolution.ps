@@ -8,6 +8,9 @@ struct VS_OUTPUT
 };
 
 static const float PI = 3.14159265359f;
+// Smaller step -> more hemisphere samples -> smoother diffuse IBL.
+// 0.015 is a quality-focused value; map is recomputed only on environment change.
+static const float IRRADIANCE_SAMPLE_DELTA = 0.0075f;
 
 float4 main(VS_OUTPUT input) : SV_Target
 {
@@ -16,13 +19,12 @@ float4 main(VS_OUTPUT input) : SV_Target
     float3 right = normalize(cross(up, N));
     up = normalize(cross(N, right));
 
-    const float sampleDelta = 0.025f;
     float nrSamples = 0.0f;
     float3 irradiance = float3(0.0f, 0.0f, 0.0f);
 
-    for (float phi = 0.0f; phi < 2.0f * PI; phi += sampleDelta)
+    for (float phi = 0.0f; phi < 2.0f * PI; phi += IRRADIANCE_SAMPLE_DELTA)
     {
-        for (float theta = 0.0f; theta < 0.5f * PI; theta += sampleDelta)
+        for (float theta = 0.0f; theta < 0.5f * PI; theta += IRRADIANCE_SAMPLE_DELTA)
         {
             float3 tangentSample = float3(
                 sin(theta) * cos(phi),

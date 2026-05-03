@@ -342,6 +342,9 @@ void Render::DumpPipelineState(const char* reason)
     DebugLogA("[LAB3][DIAG] diffuseIBL: enabled=%d intensity=%.3f\n",
         (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr) ? 1 : 0,
         m_iblIntensity);
+    DebugLogA("[LAB3][DIAG] diffuseIBL: sourceMode=%d irradianceSize=%d\n",
+        m_labAmbientSourceMode,
+        m_irradianceMapSize);
 
     for (int i = 0; i < 3; ++i)
     {
@@ -385,7 +388,8 @@ void Render::RenderScene(float roughness, float metalness, const XMFLOAT3& albed
         cb->NormalStrength = (m_normalStrength < 0.0f) ? 0.0f : m_normalStrength;
         cb->UseRoughnessMap = (m_enableRoughnessMap && m_pRoughnessTextureSRV != nullptr) ? 1.0f : 0.0f;
         cb->RoughnessMapStrength = (m_roughnessMapStrength < 0.0f) ? 0.0f : ((m_roughnessMapStrength > 1.0f) ? 1.0f : m_roughnessMapStrength);
-        cb->UseDiffuseIBL = (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr) ? 1.0f : 0.0f;
+        const bool useIrradianceAmbient = (!m_labUiMode || m_labAmbientSourceMode == 0);
+        cb->UseDiffuseIBL = (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr && useIrradianceAmbient) ? 1.0f : 0.0f;
         cb->IBLIntensity = (m_iblIntensity < 0.0f) ? 0.0f : ((m_iblIntensity > 5.0f) ? 5.0f : m_iblIntensity);
         cb->_Padding0 = 0.0f;
         cb->_Padding1 = 0.0f;
@@ -1139,17 +1143,9 @@ HRESULT Render::InitSkyResources()
     else
     {
         DebugLogA("[LAB3][DIAG] environment loaded: '%ls', SRV=%p\n", GetSelectedSkyboxRelativePath().c_str(), m_pEnvironmentSRV);
-        ID3D11ShaderResourceView* newIrradiance = nullptr;
-        const HRESULT irradianceHr = ConvolveCubemapToIrradiance(m_pEnvironmentSRV, 32, &newIrradiance);
-        if (SUCCEEDED(irradianceHr) && newIrradiance != nullptr)
+        const HRESULT irradianceHr = RebuildIrradianceFromEnvironment();
+        if (FAILED(irradianceHr))
         {
-            m_pIrradianceSRV = newIrradiance;
-        }
-        else
-        {
-            if (newIrradiance != nullptr)
-                newIrradiance->Release();
-            m_pIrradianceSRV = nullptr;
             DebugLogA("[LAB3][DIAG] irradiance convolution failed for '%ls' (hr=0x%08X)\n",
                 GetSelectedSkyboxRelativePath().c_str(),
                 static_cast<unsigned int>(irradianceHr));
@@ -1726,6 +1722,31 @@ HRESULT Render::ConvolveCubemapToIrradiance(
     return S_OK;
 }
 
+HRESULT Render::RebuildIrradianceFromEnvironment()
+{
+    if (m_pIrradianceSRV)
+    {
+        m_pIrradianceSRV->Release();
+        m_pIrradianceSRV = nullptr;
+    }
+
+    if (m_pEnvironmentSRV == nullptr)
+        return E_FAIL;
+
+    const UINT size = (m_irradianceMapSize >= 64) ? 64u : 32u;
+    ID3D11ShaderResourceView* newIrradiance = nullptr;
+    const HRESULT hr = ConvolveCubemapToIrradiance(m_pEnvironmentSRV, size, &newIrradiance);
+    if (FAILED(hr) || newIrradiance == nullptr)
+    {
+        if (newIrradiance != nullptr)
+            newIrradiance->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    m_pIrradianceSRV = newIrradiance;
+    return S_OK;
+}
+
 void Render::ReleaseTextureResources()
 {
     if (m_pAlbedoTextureSRV) { m_pAlbedoTextureSRV->Release(); m_pAlbedoTextureSRV = nullptr; }
@@ -1793,6 +1814,12 @@ void Render::RenderImGui()
          m_debugViewMode == DebugView_TBNSign))
     {
         m_debugViewMode = DebugView_Final;
+    }
+
+    if (!m_labUiMode)
+    {
+        // Lab-only ambient debug source must not affect the standard mode.
+        m_labAmbientSourceMode = 0;
     }
 
     ImGui_ImplDX11_NewFrame();
@@ -1969,6 +1996,32 @@ void Render::RenderImGui()
     {
         showDisabledHint("Enable Diffuse IBL and load irradiance map first.");
         ImGui::EndDisabled();
+    }
+
+    if (m_labUiMode)
+    {
+        static const char* ambientSourceModes[] = { "Irradiance", "Constant" };
+        int ambientMode = (m_labAmbientSourceMode == 1) ? 1 : 0;
+        if (ImGui::Combo("Ambient source (lab)", &ambientMode, ambientSourceModes, IM_ARRAYSIZE(ambientSourceModes)))
+        {
+            m_labAmbientSourceMode = (ambientMode == 1) ? 1 : 0;
+        }
+
+        static const char* irradianceQualityModes[] = { "32 (fast)", "64 (smooth)" };
+        int qualityIndex = (m_irradianceMapSize >= 64) ? 1 : 0;
+        if (ImGui::Combo("Irradiance quality (lab)", &qualityIndex, irradianceQualityModes, IM_ARRAYSIZE(irradianceQualityModes)))
+        {
+            m_irradianceMapSize = (qualityIndex == 1) ? 64 : 32;
+            if (m_pEnvironmentSRV != nullptr)
+            {
+                const HRESULT rebuildHr = RebuildIrradianceFromEnvironment();
+                if (FAILED(rebuildHr))
+                {
+                    m_enableDiffuseIBL = false;
+                    DebugLogA("[LAB3][DIAG] irradiance rebuild failed after quality change (hr=0x%08X)\n", static_cast<unsigned int>(rebuildHr));
+                }
+            }
+        }
     }
 
     if (m_labUiMode)
@@ -2156,6 +2209,8 @@ void Render::RenderImGui()
         ImGui::Text("UseNormalMap in shader: %d", useNormalMap);
         ImGui::Text("UseRoughnessMap in shader: %d", useRoughnessMap);
         ImGui::Text("UseDiffuseIBL in shader: %d", (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr) ? 1 : 0);
+        ImGui::Text("Ambient source (lab): %s", (m_labAmbientSourceMode == 1) ? "Constant" : "Irradiance");
+        ImGui::Text("Irradiance size (lab): %d", m_irradianceMapSize);
         const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
         ImGui::Text("Tonemap effective: %s", (IsTonemapEnabled() && !forceCopyEffective) ? "yes" : "no");
         if (ImGui::Button("Dump diagnostics to Output"))
