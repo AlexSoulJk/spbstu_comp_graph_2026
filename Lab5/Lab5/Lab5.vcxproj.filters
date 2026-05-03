@@ -170,6 +170,9 @@
 		<CopyFileToFolders Include="HdrToCubemap.ps" />
 		<CopyFileToFolders Include="IrradianceConvolution.ps" />
 		<CopyFileToFolders Include="LightMarker.ps" />
+		<CopyFileToFolders Include="SpecularPrefilter.ps" />
+		<CopyFileToFolders Include="BRDFIntegration.ps" />
+		<CopyFileToFolders Include="BRDFLutVS.vs" />
 		<CopyFileToFolders Include="PixelColor.ps" />
 		<CopyFileToFolders Include="SkyPixel.ps" />
 		<CopyFileToFolders Include="SkyVertex.vs" />

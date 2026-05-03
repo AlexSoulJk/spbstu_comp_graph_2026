@@ -199,6 +199,18 @@
 			<FileType>Document</FileType>
 			<DestinationFolder>$(OutDir)</DestinationFolder>
 		</CopyFileToFolders>
+		<CopyFileToFolders Include="SpecularPrefilter.ps">
+			<FileType>Document</FileType>
+			<DestinationFolder>$(OutDir)</DestinationFolder>
+		</CopyFileToFolders>
+		<CopyFileToFolders Include="BRDFIntegration.ps">
+			<FileType>Document</FileType>
+			<DestinationFolder>$(OutDir)</DestinationFolder>
+		</CopyFileToFolders>
+		<CopyFileToFolders Include="BRDFLutVS.vs">
+			<FileType>Document</FileType>
+			<DestinationFolder>$(OutDir)</DestinationFolder>
+		</CopyFileToFolders>
 		<CopyFileToFolders Include="PixelColor.ps">
 			<FileType>Document</FileType>
 			<DestinationFolder>$(OutDir)</DestinationFolder>

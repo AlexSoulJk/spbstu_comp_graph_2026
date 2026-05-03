@@ -60,13 +60,18 @@ struct SceneCB
     float RoughnessMapStrength;
     float UseDiffuseIBL;
     float IBLIntensity;
-    float _Padding0;
-    float _Padding1;
+    float UseSpecularIBL;
+    float SpecularIBLIntensity;
 };
 
 struct LightMarkerColorCB
 {
     DirectX::XMFLOAT4 Color;
+};
+
+struct SpecularPrefilterCB
+{
+    DirectX::XMFLOAT4 Params; // x = roughness, y = sourceMipCount
 };
 
 static void DebugLogA(const char* fmt, ...)
@@ -198,6 +203,41 @@ static void GetCubeCaptureFaces(CubeCaptureFace outFaces[6])
 static DirectX::XMMATRIX BuildCubemapCaptureProjection()
 {
     return XMMatrixPerspectiveFovLH(XM_PIDIV2, 1.0f, 0.1f, 10.0f);
+}
+
+static UINT CountMipLevelsFromSize(UINT size)
+{
+    UINT mipLevels = 1;
+    while (size > 1)
+    {
+        size >>= 1;
+        ++mipLevels;
+    }
+    return mipLevels;
+}
+
+static UINT ResolveCubemapMipCountFromSRV(ID3D11ShaderResourceView* srv)
+{
+    if (srv == nullptr)
+        return 1;
+
+    ID3D11Resource* resource = nullptr;
+    srv->GetResource(&resource);
+    if (resource == nullptr)
+        return 1;
+
+    ID3D11Texture2D* tex2D = nullptr;
+    UINT mipCount = 1;
+    if (SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&tex2D)) && tex2D != nullptr)
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        tex2D->GetDesc(&desc);
+        if (desc.MipLevels > 0)
+            mipCount = desc.MipLevels;
+        tex2D->Release();
+    }
+    resource->Release();
+    return mipCount;
 }
 
 static bool TryLoadDDSWithCandidates(
@@ -334,8 +374,8 @@ void Render::DumpPipelineState(const char* reason)
     DebugLogA("[LAB3][DIAG] extendViews=%d\n", m_extendViews ? 1 : 0);
     DebugLogA("[LAB3][DIAG] postprocess: tonemapByMode=%d forceCopyRaw=%d forceCopyEffective=%d tonemapEffective=%d\n",
         tonemapByMode, m_forceCopyPostprocess ? 1 : 0, forceCopyEffective ? 1 : 0, tonemapEffective);
-    DebugLogA("[LAB3][DIAG] resources: albedoSRV=%p normalSRV=%p roughSRV=%p envSRV=%p irradianceSRV=%p sampler=%p depthDSV=%p depthTex=%p\n",
-        m_pAlbedoTextureSRV, m_pNormalTextureSRV, m_pRoughnessTextureSRV, m_pEnvironmentSRV, m_pIrradianceSRV, m_pSamplerState, m_pSceneDepthView, m_pSceneDepthTexture);
+    DebugLogA("[LAB3][DIAG] resources: albedoSRV=%p normalSRV=%p roughSRV=%p envSRV=%p irradianceSRV=%p prefilterSRV=%p brdfLutSRV=%p sampler=%p depthDSV=%p depthTex=%p\n",
+        m_pAlbedoTextureSRV, m_pNormalTextureSRV, m_pRoughnessTextureSRV, m_pEnvironmentSRV, m_pIrradianceSRV, m_pSpecularPrefilterSRV, m_pBRDFLutSRV, m_pSamplerState, m_pSceneDepthView, m_pSceneDepthTexture);
     DebugLogA("[LAB3][DIAG] skyboxSelection=%ls\n", GetSelectedSkyboxRelativePath().c_str());
     DebugLogA("[LAB3][DIAG] material: color=(%.3f %.3f %.3f) rough=%.3f metal=%.3f\n",
         m_materialColor.x, m_materialColor.y, m_materialColor.z, m_materialRoughness, m_materialMetalness);
@@ -345,6 +385,11 @@ void Render::DumpPipelineState(const char* reason)
     DebugLogA("[LAB3][DIAG] diffuseIBL: sourceMode=%d irradianceSize=%d\n",
         m_labAmbientSourceMode,
         m_irradianceMapSize);
+    DebugLogA("[LAB3][DIAG] specularIBL: enabled=%d intensity=%.3f prefilterSize=%u prefilterMips=%u\n",
+        (m_enableSpecularIBL && m_pSpecularPrefilterSRV != nullptr && m_pBRDFLutSRV != nullptr) ? 1 : 0,
+        m_specularIBLIntensity,
+        m_specularPrefilterSize,
+        m_specularPrefilterMipLevels);
 
     for (int i = 0; i < 3; ++i)
     {
@@ -391,8 +436,11 @@ void Render::RenderScene(float roughness, float metalness, const XMFLOAT3& albed
         const bool useIrradianceAmbient = (!m_labUiMode || m_labAmbientSourceMode == 0);
         cb->UseDiffuseIBL = (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr && useIrradianceAmbient) ? 1.0f : 0.0f;
         cb->IBLIntensity = (m_iblIntensity < 0.0f) ? 0.0f : ((m_iblIntensity > 5.0f) ? 5.0f : m_iblIntensity);
-        cb->_Padding0 = 0.0f;
-        cb->_Padding1 = 0.0f;
+        cb->UseSpecularIBL =
+            (m_enableSpecularIBL && m_pSpecularPrefilterSRV != nullptr && m_pBRDFLutSRV != nullptr && useIrradianceAmbient)
+            ? 1.0f : 0.0f;
+        cb->SpecularIBLIntensity =
+            (m_specularIBLIntensity < 0.0f) ? 0.0f : ((m_specularIBLIntensity > 5.0f) ? 5.0f : m_specularIBLIntensity);
 
         m_pDeviceContext->Unmap(m_pSceneCB, 0);
     }
@@ -1032,6 +1080,7 @@ HRESULT Render::InitSkyResources()
     if (m_pSkyPixelShader) { m_pSkyPixelShader->Release(); m_pSkyPixelShader = nullptr; }
     if (m_pEnvironmentSRV) { m_pEnvironmentSRV->Release(); m_pEnvironmentSRV = nullptr; }
     if (m_pIrradianceSRV) { m_pIrradianceSRV->Release(); m_pIrradianceSRV = nullptr; }
+    if (m_pSpecularPrefilterSRV) { m_pSpecularPrefilterSRV->Release(); m_pSpecularPrefilterSRV = nullptr; }
     if (m_pSkyRasterState) { m_pSkyRasterState->Release(); m_pSkyRasterState = nullptr; }
     if (m_pSkyDepthState) { m_pSkyDepthState->Release(); m_pSkyDepthState = nullptr; }
 
@@ -1149,6 +1198,14 @@ HRESULT Render::InitSkyResources()
             DebugLogA("[LAB3][DIAG] irradiance convolution failed for '%ls' (hr=0x%08X)\n",
                 GetSelectedSkyboxRelativePath().c_str(),
                 static_cast<unsigned int>(irradianceHr));
+        }
+
+        const HRESULT specularHr = RebuildSpecularIBLFromEnvironment();
+        if (FAILED(specularHr))
+        {
+            DebugLogA("[LAB3][DIAG] specular IBL rebuild failed for '%ls' (hr=0x%08X)\n",
+                GetSelectedSkyboxRelativePath().c_str(),
+                static_cast<unsigned int>(specularHr));
         }
     }
 
@@ -1747,6 +1804,514 @@ HRESULT Render::RebuildIrradianceFromEnvironment()
     return S_OK;
 }
 
+HRESULT Render::GenerateBRDFLUT(
+    UINT lutWidth,
+    UINT lutHeight,
+    ID3D11ShaderResourceView** outBRDFLUTSRV)
+{
+    if (outBRDFLUTSRV == nullptr)
+        return E_INVALIDARG;
+    *outBRDFLUTSRV = nullptr;
+
+    ID3D11RenderTargetView* oldRTV = nullptr;
+    ID3D11DepthStencilView* oldDSV = nullptr;
+    m_pDeviceContext->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    UINT oldViewportCount = 1;
+    D3D11_VIEWPORT oldViewport{};
+    m_pDeviceContext->RSGetViewports(&oldViewportCount, &oldViewport);
+
+    D3D11_PRIMITIVE_TOPOLOGY oldTopology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    m_pDeviceContext->IAGetPrimitiveTopology(&oldTopology);
+
+    ID3D11InputLayout* oldLayout = nullptr;
+    ID3D11VertexShader* oldVS = nullptr;
+    ID3D11PixelShader* oldPS = nullptr;
+    m_pDeviceContext->IAGetInputLayout(&oldLayout);
+    m_pDeviceContext->VSGetShader(&oldVS, nullptr, nullptr);
+    m_pDeviceContext->PSGetShader(&oldPS, nullptr, nullptr);
+
+    ID3DBlob* fullScreenVsBlob = nullptr;
+    HRESULT hr = CompileShader(L"BRDFLutVS.vs", &fullScreenVsBlob);
+    if (FAILED(hr) || fullScreenVsBlob == nullptr)
+    {
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    ID3D11VertexShader* fullScreenVS = nullptr;
+    hr = m_pDevice->CreateVertexShader(
+        fullScreenVsBlob->GetBufferPointer(),
+        fullScreenVsBlob->GetBufferSize(),
+        nullptr,
+        &fullScreenVS
+    );
+    fullScreenVsBlob->Release();
+    if (FAILED(hr) || fullScreenVS == nullptr)
+    {
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    ID3DBlob* brdfPsBlob = nullptr;
+    hr = CompileShader(L"BRDFIntegration.ps", &brdfPsBlob);
+    if (FAILED(hr) || brdfPsBlob == nullptr)
+    {
+        fullScreenVS->Release();
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    ID3D11PixelShader* brdfPS = nullptr;
+    hr = m_pDevice->CreatePixelShader(
+        brdfPsBlob->GetBufferPointer(),
+        brdfPsBlob->GetBufferSize(),
+        nullptr,
+        &brdfPS
+    );
+    brdfPsBlob->Release();
+    if (FAILED(hr) || brdfPS == nullptr)
+    {
+        fullScreenVS->Release();
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    D3D11_TEXTURE2D_DESC texDesc{};
+    texDesc.Width = lutWidth;
+    texDesc.Height = lutHeight;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 1;
+    texDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    ID3D11Texture2D* lutTexture = nullptr;
+    hr = m_pDevice->CreateTexture2D(&texDesc, nullptr, &lutTexture);
+    if (FAILED(hr) || lutTexture == nullptr)
+    {
+        brdfPS->Release();
+        fullScreenVS->Release();
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    ID3D11RenderTargetView* lutRTV = nullptr;
+    hr = m_pDevice->CreateRenderTargetView(lutTexture, nullptr, &lutRTV);
+    if (FAILED(hr) || lutRTV == nullptr)
+    {
+        lutTexture->Release();
+        brdfPS->Release();
+        fullScreenVS->Release();
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    ID3D11ShaderResourceView* lutSRV = nullptr;
+    hr = m_pDevice->CreateShaderResourceView(lutTexture, nullptr, &lutSRV);
+    if (FAILED(hr) || lutSRV == nullptr)
+    {
+        lutRTV->Release();
+        lutTexture->Release();
+        brdfPS->Release();
+        fullScreenVS->Release();
+        if (oldLayout) oldLayout->Release();
+        if (oldVS) oldVS->Release();
+        if (oldPS) oldPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    float clearColor[4] = { 0, 0, 0, 0 };
+    m_pDeviceContext->OMSetRenderTargets(1, &lutRTV, nullptr);
+    m_pDeviceContext->ClearRenderTargetView(lutRTV, clearColor);
+
+    D3D11_VIEWPORT lutViewport{};
+    lutViewport.TopLeftX = 0.0f;
+    lutViewport.TopLeftY = 0.0f;
+    lutViewport.Width = static_cast<float>(lutWidth);
+    lutViewport.Height = static_cast<float>(lutHeight);
+    lutViewport.MinDepth = 0.0f;
+    lutViewport.MaxDepth = 1.0f;
+    m_pDeviceContext->RSSetViewports(1, &lutViewport);
+
+    m_pDeviceContext->IASetInputLayout(nullptr);
+    m_pDeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    m_pDeviceContext->VSSetShader(fullScreenVS, nullptr, 0);
+    m_pDeviceContext->PSSetShader(brdfPS, nullptr, 0);
+    m_pDeviceContext->Draw(3, 0);
+
+    m_pDeviceContext->OMSetRenderTargets(1, &oldRTV, oldDSV);
+    if (oldViewportCount > 0)
+        m_pDeviceContext->RSSetViewports(1, &oldViewport);
+    m_pDeviceContext->IASetPrimitiveTopology(oldTopology);
+    m_pDeviceContext->IASetInputLayout(oldLayout);
+    m_pDeviceContext->VSSetShader(oldVS, nullptr, 0);
+    m_pDeviceContext->PSSetShader(oldPS, nullptr, 0);
+
+    if (oldLayout) oldLayout->Release();
+    if (oldVS) oldVS->Release();
+    if (oldPS) oldPS->Release();
+    if (oldRTV) oldRTV->Release();
+    if (oldDSV) oldDSV->Release();
+
+    lutRTV->Release();
+    lutTexture->Release();
+    brdfPS->Release();
+    fullScreenVS->Release();
+
+    *outBRDFLUTSRV = lutSRV;
+    return S_OK;
+}
+
+HRESULT Render::PrefilterCubemapSpecular(
+    ID3D11ShaderResourceView* environmentCubeSRV,
+    UINT prefilterSize,
+    UINT mipLevels,
+    ID3D11ShaderResourceView** outPrefilterSRV)
+{
+    if (environmentCubeSRV == nullptr || outPrefilterSRV == nullptr || camera == nullptr)
+        return E_INVALIDARG;
+
+    *outPrefilterSRV = nullptr;
+
+    ModelManagerAbstract* captureModel = ModelFactory::CreateModel(ModelFactory::ModelCode::cube, m_pDeviceContext);
+    if (captureModel == nullptr)
+        return E_FAIL;
+
+    struct ScopedModelRelease
+    {
+        ModelManagerAbstract*& ModelRef;
+        ~ScopedModelRelease()
+        {
+            if (ModelRef != nullptr)
+            {
+                ModelFactory::ReleaseModel(ModelRef);
+                ModelRef = nullptr;
+            }
+        }
+    } captureModelGuard{ captureModel };
+
+    HRESULT hr = captureModel->InitModel(m_pDevice);
+    if (FAILED(hr))
+        return hr;
+
+    ID3DBlob* prefilterPsBlob = nullptr;
+    hr = CompileShader(L"SpecularPrefilter.ps", &prefilterPsBlob);
+    if (FAILED(hr) || prefilterPsBlob == nullptr)
+        return FAILED(hr) ? hr : E_FAIL;
+
+    ID3D11PixelShader* prefilterPS = nullptr;
+    hr = m_pDevice->CreatePixelShader(
+        prefilterPsBlob->GetBufferPointer(),
+        prefilterPsBlob->GetBufferSize(),
+        nullptr,
+        &prefilterPS
+    );
+    prefilterPsBlob->Release();
+    if (FAILED(hr) || prefilterPS == nullptr)
+        return FAILED(hr) ? hr : E_FAIL;
+
+    D3D11_BUFFER_DESC prefilterCbDesc{};
+    prefilterCbDesc.Usage = D3D11_USAGE_DEFAULT;
+    prefilterCbDesc.ByteWidth = sizeof(SpecularPrefilterCB);
+    prefilterCbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+
+    ID3D11Buffer* prefilterCB = nullptr;
+    hr = m_pDevice->CreateBuffer(&prefilterCbDesc, nullptr, &prefilterCB);
+    if (FAILED(hr) || prefilterCB == nullptr)
+    {
+        prefilterPS->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    D3D11_TEXTURE2D_DESC cubeDesc{};
+    cubeDesc.Width = prefilterSize;
+    cubeDesc.Height = prefilterSize;
+    cubeDesc.MipLevels = mipLevels;
+    cubeDesc.ArraySize = 6;
+    cubeDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    cubeDesc.SampleDesc.Count = 1;
+    cubeDesc.Usage = D3D11_USAGE_DEFAULT;
+    cubeDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    cubeDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+    ID3D11Texture2D* prefilterTexture = nullptr;
+    hr = m_pDevice->CreateTexture2D(&cubeDesc, nullptr, &prefilterTexture);
+    if (FAILED(hr) || prefilterTexture == nullptr)
+    {
+        prefilterCB->Release();
+        prefilterPS->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC prefilterSrvDesc{};
+    prefilterSrvDesc.Format = cubeDesc.Format;
+    prefilterSrvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+    prefilterSrvDesc.TextureCube.MostDetailedMip = 0;
+    prefilterSrvDesc.TextureCube.MipLevels = mipLevels;
+
+    ID3D11ShaderResourceView* prefilterSRV = nullptr;
+    hr = m_pDevice->CreateShaderResourceView(prefilterTexture, &prefilterSrvDesc, &prefilterSRV);
+    if (FAILED(hr) || prefilterSRV == nullptr)
+    {
+        prefilterTexture->Release();
+        prefilterCB->Release();
+        prefilterPS->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
+    std::vector<ID3D11RenderTargetView*> faceRTVs;
+    faceRTVs.resize(static_cast<size_t>(mipLevels) * 6u, nullptr);
+    for (UINT mip = 0; mip < mipLevels; ++mip)
+    {
+        for (UINT face = 0; face < 6; ++face)
+        {
+            D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+            rtvDesc.Format = cubeDesc.Format;
+            rtvDesc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+            rtvDesc.Texture2DArray.MipSlice = mip;
+            rtvDesc.Texture2DArray.FirstArraySlice = face;
+            rtvDesc.Texture2DArray.ArraySize = 1;
+
+            hr = m_pDevice->CreateRenderTargetView(
+                prefilterTexture,
+                &rtvDesc,
+                &faceRTVs[static_cast<size_t>(mip) * 6u + static_cast<size_t>(face)]
+            );
+            if (FAILED(hr))
+            {
+                for (ID3D11RenderTargetView* rtv : faceRTVs)
+                {
+                    if (rtv != nullptr)
+                        rtv->Release();
+                }
+                prefilterSRV->Release();
+                prefilterTexture->Release();
+                prefilterCB->Release();
+                prefilterPS->Release();
+                return hr;
+            }
+        }
+    }
+
+    UINT oldViewportCount = 1;
+    D3D11_VIEWPORT oldViewport{};
+    m_pDeviceContext->RSGetViewports(&oldViewportCount, &oldViewport);
+
+    ID3D11RenderTargetView* oldRTV = nullptr;
+    ID3D11DepthStencilView* oldDSV = nullptr;
+    m_pDeviceContext->OMGetRenderTargets(1, &oldRTV, &oldDSV);
+
+    ID3D11RasterizerState* oldRasterState = nullptr;
+    m_pDeviceContext->RSGetState(&oldRasterState);
+
+    D3D11_RASTERIZER_DESC rsDesc{};
+    rsDesc.FillMode = D3D11_FILL_SOLID;
+    rsDesc.CullMode = D3D11_CULL_FRONT;
+    rsDesc.DepthClipEnable = TRUE;
+
+    ID3D11RasterizerState* cubeRasterState = nullptr;
+    hr = m_pDevice->CreateRasterizerState(&rsDesc, &cubeRasterState);
+    if (FAILED(hr))
+    {
+        for (ID3D11RenderTargetView* rtv : faceRTVs)
+        {
+            if (rtv != nullptr)
+                rtv->Release();
+        }
+        prefilterSRV->Release();
+        prefilterTexture->Release();
+        prefilterCB->Release();
+        prefilterPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        if (oldRasterState) oldRasterState->Release();
+        return hr;
+    }
+
+    m_pDeviceContext->RSSetState(cubeRasterState);
+    m_pDeviceContext->IASetInputLayout(m_pInputLayout);
+    m_pDeviceContext->VSSetShader(m_pSkyVertexShader, nullptr, 0);
+    m_pDeviceContext->PSSetShader(prefilterPS, nullptr, 0);
+    m_pDeviceContext->PSSetShaderResources(0, 1, &environmentCubeSRV);
+    m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerState);
+    m_pDeviceContext->PSSetConstantBuffers(4, 1, &prefilterCB);
+
+    XMVECTOR eye = XMVectorZero();
+    CubeCaptureFace captureFaces[6]{};
+    GetCubeCaptureFaces(captureFaces);
+
+    captureModel->SetModelMatrix(XMMatrixIdentity());
+
+    ID3D11Buffer* cameraVPBuffer = camera->GetVPBuffer();
+    if (cameraVPBuffer == nullptr)
+    {
+        for (ID3D11RenderTargetView* rtv : faceRTVs)
+        {
+            if (rtv != nullptr)
+                rtv->Release();
+        }
+        prefilterSRV->Release();
+        prefilterTexture->Release();
+        prefilterCB->Release();
+        prefilterPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        if (oldRasterState) oldRasterState->Release();
+        if (cubeRasterState) cubeRasterState->Release();
+        return E_FAIL;
+    }
+
+    const XMMATRIX proj = BuildCubemapCaptureProjection();
+    const UINT sourceMipCount = ResolveCubemapMipCountFromSRV(environmentCubeSRV);
+
+    for (UINT mip = 0; mip < mipLevels; ++mip)
+    {
+        const UINT mipWidth = (prefilterSize >> mip) > 0u ? (prefilterSize >> mip) : 1u;
+        const UINT mipHeight = (prefilterSize >> mip) > 0u ? (prefilterSize >> mip) : 1u;
+
+        D3D11_VIEWPORT cubeViewport{};
+        cubeViewport.TopLeftX = 0.0f;
+        cubeViewport.TopLeftY = 0.0f;
+        cubeViewport.Width = static_cast<float>(mipWidth);
+        cubeViewport.Height = static_cast<float>(mipHeight);
+        cubeViewport.MinDepth = 0.0f;
+        cubeViewport.MaxDepth = 1.0f;
+        m_pDeviceContext->RSSetViewports(1, &cubeViewport);
+
+        const float roughness = (mipLevels > 1) ? (static_cast<float>(mip) / static_cast<float>(mipLevels - 1)) : 0.0f;
+        SpecularPrefilterCB prefilterData{};
+        prefilterData.Params = XMFLOAT4(roughness, static_cast<float>(sourceMipCount), 0.0f, 0.0f);
+        m_pDeviceContext->UpdateSubresource(prefilterCB, 0, nullptr, &prefilterData, 0, 0);
+
+        for (UINT face = 0; face < 6; ++face)
+        {
+            ID3D11RenderTargetView* rtv = faceRTVs[static_cast<size_t>(mip) * 6u + static_cast<size_t>(face)];
+            const float clear[4] = { 0, 0, 0, 1 };
+            m_pDeviceContext->OMSetRenderTargets(1, &rtv, nullptr);
+            m_pDeviceContext->ClearRenderTargetView(rtv, clear);
+
+            const XMMATRIX view = XMMatrixLookToLH(eye, captureFaces[face].Target, captureFaces[face].Up);
+            const XMMATRIX vp = XMMatrixTranspose(view * proj);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            hr = m_pDeviceContext->Map(cameraVPBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+            if (FAILED(hr))
+                break;
+            std::memcpy(mapped.pData, &vp, sizeof(XMMATRIX));
+            m_pDeviceContext->Unmap(cameraVPBuffer, 0);
+            m_pDeviceContext->VSSetConstantBuffers(1, 1, &cameraVPBuffer);
+
+            captureModel->Render();
+        }
+
+        if (FAILED(hr))
+            break;
+    }
+
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    m_pDeviceContext->PSSetShaderResources(0, 1, &nullSRV);
+
+    m_pDeviceContext->OMSetRenderTargets(1, &oldRTV, oldDSV);
+    if (oldViewportCount > 0)
+        m_pDeviceContext->RSSetViewports(1, &oldViewport);
+    m_pDeviceContext->RSSetState(oldRasterState);
+
+    if (oldRTV) oldRTV->Release();
+    if (oldDSV) oldDSV->Release();
+    if (oldRasterState) oldRasterState->Release();
+    if (cubeRasterState) cubeRasterState->Release();
+
+    for (ID3D11RenderTargetView* rtv : faceRTVs)
+    {
+        if (rtv != nullptr)
+            rtv->Release();
+    }
+
+    prefilterTexture->Release();
+    prefilterCB->Release();
+    prefilterPS->Release();
+
+    if (FAILED(hr))
+    {
+        prefilterSRV->Release();
+        return hr;
+    }
+
+    *outPrefilterSRV = prefilterSRV;
+    return S_OK;
+}
+
+HRESULT Render::RebuildSpecularIBLFromEnvironment()
+{
+    if (m_pSpecularPrefilterSRV != nullptr)
+    {
+        m_pSpecularPrefilterSRV->Release();
+        m_pSpecularPrefilterSRV = nullptr;
+    }
+
+    if (m_pEnvironmentSRV == nullptr)
+        return E_FAIL;
+
+    if (m_pBRDFLutSRV == nullptr)
+    {
+        ID3D11ShaderResourceView* brdfLut = nullptr;
+        const HRESULT lutHr = GenerateBRDFLUT(512, 512, &brdfLut);
+        if (FAILED(lutHr) || brdfLut == nullptr)
+        {
+            if (brdfLut != nullptr)
+                brdfLut->Release();
+            return FAILED(lutHr) ? lutHr : E_FAIL;
+        }
+        m_pBRDFLutSRV = brdfLut;
+    }
+
+    const UINT size = (m_specularPrefilterSize < 16u) ? 16u : m_specularPrefilterSize;
+    const UINT maxMipsBySize = CountMipLevelsFromSize(size);
+    UINT mipLevels = (m_specularPrefilterMipLevels < 2u) ? 2u : m_specularPrefilterMipLevels;
+    if (mipLevels > maxMipsBySize)
+        mipLevels = maxMipsBySize;
+
+    ID3D11ShaderResourceView* newPrefilter = nullptr;
+    const HRESULT prefilterHr = PrefilterCubemapSpecular(m_pEnvironmentSRV, size, mipLevels, &newPrefilter);
+    if (FAILED(prefilterHr) || newPrefilter == nullptr)
+    {
+        if (newPrefilter != nullptr)
+            newPrefilter->Release();
+        return FAILED(prefilterHr) ? prefilterHr : E_FAIL;
+    }
+
+    m_pSpecularPrefilterSRV = newPrefilter;
+    m_specularPrefilterMipLevels = mipLevels;
+    return S_OK;
+}
+
 void Render::ReleaseTextureResources()
 {
     if (m_pAlbedoTextureSRV) { m_pAlbedoTextureSRV->Release(); m_pAlbedoTextureSRV = nullptr; }
@@ -1759,6 +2324,8 @@ void Render::ReleaseSkyResources()
 {
     if (m_pEnvironmentSRV) { m_pEnvironmentSRV->Release(); m_pEnvironmentSRV = nullptr; }
     if (m_pIrradianceSRV) { m_pIrradianceSRV->Release(); m_pIrradianceSRV = nullptr; }
+    if (m_pSpecularPrefilterSRV) { m_pSpecularPrefilterSRV->Release(); m_pSpecularPrefilterSRV = nullptr; }
+    if (m_pBRDFLutSRV) { m_pBRDFLutSRV->Release(); m_pBRDFLutSRV = nullptr; }
     if (m_pSkyVertexShader) { m_pSkyVertexShader->Release(); m_pSkyVertexShader = nullptr; }
     if (m_pSkyPixelShader) { m_pSkyPixelShader->Release(); m_pSkyPixelShader = nullptr; }
     if (m_pSkyRasterState) { m_pSkyRasterState->Release(); m_pSkyRasterState = nullptr; }
@@ -1998,6 +2565,29 @@ void Render::RenderImGui()
         ImGui::EndDisabled();
     }
 
+    const bool canUseSpecularIBL = (m_pSpecularPrefilterSRV != nullptr && m_pBRDFLutSRV != nullptr);
+    if (!canUseSpecularIBL)
+    {
+        m_enableSpecularIBL = false;
+        ImGui::BeginDisabled(true);
+    }
+    ImGui::Checkbox("Use Specular IBL", &m_enableSpecularIBL);
+    if (!canUseSpecularIBL)
+    {
+        showDisabledHint("Specular prefilter cubemap or BRDF LUT is not available.");
+        ImGui::EndDisabled();
+    }
+
+    const bool canEditSpecularIblIntensity = m_enableSpecularIBL && canUseSpecularIBL;
+    if (!canEditSpecularIblIntensity)
+        ImGui::BeginDisabled(true);
+    ImGui::SliderFloat("Specular IBL intensity", &m_specularIBLIntensity, 0.0f, 5.0f);
+    if (!canEditSpecularIblIntensity)
+    {
+        showDisabledHint("Enable Specular IBL and ensure prefilter/LUT resources are loaded.");
+        ImGui::EndDisabled();
+    }
+
     if (m_labUiMode)
     {
         static const char* ambientSourceModes[] = { "Irradiance", "Constant" };
@@ -2059,35 +2649,30 @@ void Render::RenderImGui()
         }
     }
 
-    const bool lockSingleMaterialByGrid = m_gridMode;
     const bool lockSingleMaterialByRoughnessTexture = (m_enableRoughnessMap && canUseRoughnessMap);
-    const bool lockSingleMaterialControls = lockSingleMaterialByGrid || lockSingleMaterialByRoughnessTexture;
+    const bool lockSingleMaterialControls = lockSingleMaterialByRoughnessTexture;
     if (lockSingleMaterialControls)
         ImGui::BeginDisabled(true);
     ImGui::SliderFloat("Roughness", &m_materialRoughness, 0.04f, 1.0f);
-    if (lockSingleMaterialByGrid)
-        showDisabledHint("Single-object roughness is not used in Grid mode.");
-    else if (lockSingleMaterialByRoughnessTexture)
+    if (lockSingleMaterialByRoughnessTexture)
         showDisabledHint("Roughness slider is locked while roughness map is enabled.");
     ImGui::SliderFloat("Metalness", &m_materialMetalness, 0.0f, 1.0f);
     if (lockSingleMaterialControls)
     {
-        if (lockSingleMaterialByGrid)
-            showDisabledHint("Single-object metalness is not used in Grid mode.");
-        else
-            showDisabledHint("Metalness slider is locked while roughness map is enabled.");
+        showDisabledHint("Metalness slider is locked while roughness map is enabled.");
         ImGui::EndDisabled();
-        if (lockSingleMaterialByGrid)
-            ImGui::TextDisabled("Roughness/Metalness sliders are ignored in Grid mode.");
-        else
-            ImGui::TextDisabled("Roughness map is active: Roughness/Metalness sliders are locked.");
+        ImGui::TextDisabled("Roughness map is active: Roughness/Metalness sliders are locked.");
+    }
+    else if (m_gridMode)
+    {
+        ImGui::TextDisabled("Roughness/Metalness shift the grid distribution in Grid mode.");
     }
     ImGui::ColorEdit3("Color", &m_materialColor.x);
     if (m_labUiMode && ImGui::Button("Reference material preset"))
     {
-        m_materialRoughness = 0.6f;
-        m_materialMetalness = 0.6f;
-        m_materialColor = XMFLOAT3(1.0f, 1.0f, 1.0f);
+        m_materialRoughness = 0.22f;
+        m_materialMetalness = 0.88f;
+        m_materialColor = XMFLOAT3(0.98f, 0.98f, 0.98f);
     }
 
     static const char* materialNames[] = { "Marble", "Roof", "Legacy cat" };
@@ -2202,6 +2787,8 @@ void Render::RenderImGui()
         ImGui::Text("Roughness SRV: %s", m_pRoughnessTextureSRV ? "loaded" : "null");
         ImGui::Text("Skybox SRV: %s", m_pEnvironmentSRV ? "loaded" : "null");
         ImGui::Text("Irradiance SRV: %s", m_pIrradianceSRV ? "loaded" : "null");
+        ImGui::Text("Specular prefilter SRV: %s", m_pSpecularPrefilterSRV ? "loaded" : "null");
+        ImGui::Text("BRDF LUT SRV: %s", m_pBRDFLutSRV ? "loaded" : "null");
         ImGui::Text("Skybox selected: %s", currentSkyboxName.c_str());
         ImGui::Text("Environment entries: %d", static_cast<int>(m_environmentEntries.size()));
         ImGui::Text("Single sphere scale: %.2f", m_singleSphereScale);
@@ -2209,6 +2796,8 @@ void Render::RenderImGui()
         ImGui::Text("UseNormalMap in shader: %d", useNormalMap);
         ImGui::Text("UseRoughnessMap in shader: %d", useRoughnessMap);
         ImGui::Text("UseDiffuseIBL in shader: %d", (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr) ? 1 : 0);
+        ImGui::Text("UseSpecularIBL in shader: %d",
+            (m_enableSpecularIBL && m_pSpecularPrefilterSRV != nullptr && m_pBRDFLutSRV != nullptr) ? 1 : 0);
         ImGui::Text("Ambient source (lab): %s", (m_labAmbientSourceMode == 1) ? "Constant" : "Irradiance");
         ImGui::Text("Irradiance size (lab): %d", m_irradianceMapSize);
         const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
@@ -2252,8 +2841,8 @@ void Render::RenderSkybox()
 
     m_currentModel->Render();
 
-    ID3D11ShaderResourceView* nullSRVs[4] = { nullptr, nullptr, nullptr, nullptr };
-    m_pDeviceContext->PSSetShaderResources(0, 4, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    m_pDeviceContext->PSSetShaderResources(0, 6, nullSRVs);
     m_pDeviceContext->RSSetState(oldRS);
     m_pDeviceContext->OMSetDepthStencilState(oldDS, oldStencilRef);
 
@@ -2266,8 +2855,8 @@ void Render::RenderLightMarkers()
     if (!m_currentModel || !m_pLightMarkerPixelShader || !m_pLightMarkerColorCB)
         return;
 
-    ID3D11ShaderResourceView* nullSRVs[4] = { nullptr, nullptr, nullptr, nullptr };
-    m_pDeviceContext->PSSetShaderResources(0, 4, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    m_pDeviceContext->PSSetShaderResources(0, 6, nullSRVs);
     m_pDeviceContext->PSSetShader(m_pLightMarkerPixelShader, nullptr, 0);
     m_pDeviceContext->PSSetConstantBuffers(4, 1, &m_pLightMarkerColorCB);
 
@@ -2426,8 +3015,19 @@ void Render::DrawSceneObjects()
     {
         for (int col = 0; col < cols; ++col)
         {
-            const float roughness = static_cast<float>(col) / static_cast<float>(cols - 1);
-            const float metalness = static_cast<float>(rows - 1 - row) / static_cast<float>(rows - 1);
+            const float roughnessBase = static_cast<float>(col) / static_cast<float>(cols - 1);
+            const float metalnessBase = static_cast<float>(rows - 1 - row) / static_cast<float>(rows - 1);
+
+            // Apply user roughness/metalness as grid-domain shifts:
+            // slider center = 0.5 means no shift.
+            const float roughnessShift = (m_materialRoughness - 0.5f);
+            const float metalnessShift = (m_materialMetalness - 0.5f);
+            float roughness = roughnessBase + roughnessShift;
+            float metalness = metalnessBase + metalnessShift;
+            if (roughness < 0.04f) roughness = 0.04f;
+            if (roughness > 1.0f) roughness = 1.0f;
+            if (metalness < 0.0f) metalness = 0.0f;
+            if (metalness > 1.0f) metalness = 1.0f;
 
             const float x = (col - halfCols) * m_gridSpacing;
             const float y = (row - halfRows) * m_gridSpacing;
@@ -2450,8 +3050,8 @@ void Render::RenderStart()
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Clear");
     //m_pDeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
     m_pDeviceContext->ClearState();
-    ID3D11ShaderResourceView* nullSRVs[4] = { nullptr, nullptr, nullptr, nullptr };
-    m_pDeviceContext->PSSetShaderResources(0, 4, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    m_pDeviceContext->PSSetShaderResources(0, 6, nullSRVs);
     m_pRenderedSceneTexture->set(m_pDevice, m_pDeviceContext);
     float BackColor[4] = { 0.06f, 0.08f, 0.10f, 1.0f };
     //m_pDeviceContext->ClearRenderTargetView(m_pRenderTargetView, BackColor);
@@ -2496,12 +3096,14 @@ void Render::RenderStart()
     m_pDeviceContext->PSSetShaderResources(1, 1, &m_pNormalTextureSRV);
     m_pDeviceContext->PSSetShaderResources(2, 1, &m_pRoughnessTextureSRV);
     m_pDeviceContext->PSSetShaderResources(3, 1, &m_pIrradianceSRV);
+    m_pDeviceContext->PSSetShaderResources(4, 1, &m_pSpecularPrefilterSRV);
+    m_pDeviceContext->PSSetShaderResources(5, 1, &m_pBRDFLutSRV);
 
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Draw Model");
     DrawSceneObjects();
     RenderLightMarkers();
     if (m_pAnnotation) m_pAnnotation->EndEvent();
-    m_pDeviceContext->PSSetShaderResources(0, 4, nullSRVs);
+    m_pDeviceContext->PSSetShaderResources(0, 6, nullSRVs);
 
     const bool forceCopyEffective = m_labUiMode && m_forceCopyPostprocess;
     const bool useTonemap = IsTonemapEnabled() && !forceCopyEffective;

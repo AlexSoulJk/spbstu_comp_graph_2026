@@ -2,6 +2,8 @@ Texture2D diffuseTexture : register(t0);
 Texture2D normalTexture : register(t1);
 Texture2D roughnessTexture : register(t2);
 TextureCube irradianceMap : register(t3);
+TextureCube prefilteredEnvMap : register(t4);
+Texture2D brdfLUT : register(t5);
 SamplerState samplerState : register(s0);
 
 cbuffer SceneCB : register(b2)
@@ -32,8 +34,8 @@ cbuffer SceneCB : register(b2)
     float RoughnessMapStrength;
     float UseDiffuseIBL;
     float IBLIntensity;
-    float _Padding0;
-    float _Padding1;
+    float UseSpecularIBL;
+    float SpecularIBLIntensity;
 };
 
 struct PS_INPUT
@@ -79,6 +81,13 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     float ct = clamp(cosTheta, 0.0f, 1.0f);
     return F0 + (1.0f - F0) * pow(1.0f - ct, 5.0f);
+}
+
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness)
+{
+    float ct = clamp(cosTheta, 0.0f, 1.0f);
+    float3 oneMinusR = float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness);
+    return F0 + (max(oneMinusR, F0) - F0) * pow(1.0f - ct, 5.0f);
 }
 
 float3 LightRadiance(PointLight L, float3 P)
@@ -294,13 +303,25 @@ float4 main(PS_INPUT input) : SV_Target
     }
 
     float useDiffuseIBL = step(0.5f, UseDiffuseIBL);
-    float3 kSView = FresnelSchlick(NdotV, F0);
+    float useSpecularIBL = step(0.5f, UseSpecularIBL);
+
+    float3 Fview = FresnelSchlickRoughness(NdotV, F0, roughness);
+    float3 kSView = Fview;
     float3 kDView = (1.0f - kSView) * (1.0f - metalness);
+
     float3 irradiance = irradianceMap.Sample(samplerState, N).rgb;
     float3 diffuseIBL = kDView * irradiance * albedo * AO * max(IBLIntensity, 0.0f);
 
+    const float MAX_REFLECTION_LOD = 4.0f;
+    float3 R = reflect(-V, N);
+    float3 prefilteredColor = prefilteredEnvMap.SampleLevel(samplerState, R, roughness * MAX_REFLECTION_LOD).rgb;
+    float2 envBRDF = brdfLUT.Sample(samplerState, float2(NdotV, roughness)).rg;
+    float3 specularIBL = prefilteredColor * (Fview * envBRDF.x + envBRDF.y) * max(SpecularIBLIntensity, 0.0f);
+
+    float3 ambientIBL = diffuseIBL * useDiffuseIBL + specularIBL * useSpecularIBL;
+    float useAnyIBL = saturate(useDiffuseIBL + useSpecularIBL);
     float3 ambientFallback = 0.06f * albedo * AO;
-    float3 ambient = lerp(ambientFallback, diffuseIBL, useDiffuseIBL);
+    float3 ambient = lerp(ambientFallback, ambientIBL, useAnyIBL);
     float3 color = ambient + Lo;
 
     return float4(max(color, 0.0f), 1.0f);
