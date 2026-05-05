@@ -93,6 +93,12 @@
 		<ClInclude Include="stb\stb_image.h">
 			<Filter>Файлы заголовков</Filter>
 		</ClInclude>
+		<ClInclude Include="GltfAssetLoader.h">
+			<Filter>Файлы заголовков</Filter>
+		</ClInclude>
+		<ClInclude Include="GltfModel.h">
+			<Filter>Файлы заголовков</Filter>
+		</ClInclude>
 	</ItemGroup>
 	<ItemGroup>
 		<ClCompile Include="Lab6.cpp">
@@ -150,6 +156,12 @@
 			<Filter>Исходные файлы</Filter>
 		</ClCompile>
 		<ClCompile Include="imgui\backends\imgui_impl_win32.cpp">
+			<Filter>Исходные файлы</Filter>
+		</ClCompile>
+		<ClCompile Include="GltfAssetLoader.cpp">
+			<Filter>Исходные файлы</Filter>
+		</ClCompile>
+		<ClCompile Include="GltfModel.cpp">
 			<Filter>Исходные файлы</Filter>
 		</ClCompile>
 	</ItemGroup>

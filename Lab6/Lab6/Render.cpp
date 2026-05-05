@@ -1,6 +1,7 @@
 ﻿#include "framework.h"
 #include "Render.h"
 #include "DDSTextureLoader11.h"
+#include "GltfModel.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -362,10 +363,20 @@ void Render::DumpPipelineState(const char* reason)
     const int materialIndex = (m_materialPresetIndex >= 0 && m_materialPresetIndex < (int)IM_ARRAYSIZE(kMaterialPresets))
         ? m_materialPresetIndex
         : 0;
+    GltfModel* activeGltfModel = dynamic_cast<GltfModel*>(m_currentModel);
+    const bool isGltfModel = (activeGltfModel != nullptr);
+    const size_t gltfPrimitiveCount = isGltfModel ? activeGltfModel->GetPrimitiveCount() : 0u;
 
     DebugLogA("\n[LAB3][DIAG] --- %s ---\n", (reason != nullptr) ? reason : "no-reason");
     DebugLogA("[LAB3][DIAG] mode=%d (%s), grid=%d, sky=%d, texToggle=%d, useTexture=%d\n",
         debugMode, DebugModeToString(debugMode), m_gridMode ? 1 : 0, m_enableSkybox ? 1 : 0, m_enableTextures ? 1 : 0, useTexture);
+    DebugLogA("[LAB3][DIAG] model: code=%d isGltf=%d gltfPrimitives=%llu\n",
+        static_cast<int>(m_currentModelCode),
+        isGltfModel ? 1 : 0,
+        static_cast<unsigned long long>(gltfPrimitiveCount));
+    DebugLogA("[LAB3][DIAG] gltfDebug: flatOnly=%d depthOff=%d\n",
+        m_debugGltfFlatOnly ? 1 : 0,
+        m_debugGltfDisableDepthTest ? 1 : 0);
     DebugLogA("[LAB3][DIAG] materialPreset=%d (%s), normalToggle=%d, useNormalMap=%d, normalStrength=%.2f, roughToggle=%d, useRough=%d, roughStrength=%.2f\n",
         materialIndex, kMaterialPresets[materialIndex].Name,
         m_enableNormalMap ? 1 : 0, useNormalMap, m_normalStrength,
@@ -402,8 +413,15 @@ void Render::DumpPipelineState(const char* reason)
     }
 }
 
-void Render::RenderScene(float roughness, float metalness, const XMFLOAT3& albedo)
+void Render::RenderScene(float roughness, float metalness, const XMFLOAT3& albedo, const MaterialBindingOverride* overrideBinding)
 {
+    ID3D11ShaderResourceView* albedoSrv = (overrideBinding != nullptr) ? overrideBinding->AlbedoSRV : m_pAlbedoTextureSRV;
+    ID3D11ShaderResourceView* normalSrv = (overrideBinding != nullptr) ? overrideBinding->NormalSRV : m_pNormalTextureSRV;
+    ID3D11ShaderResourceView* roughnessSrv = (overrideBinding != nullptr) ? overrideBinding->RoughnessSRV : m_pRoughnessTextureSRV;
+    const bool useAlbedo = (overrideBinding != nullptr) ? overrideBinding->UseAlbedo : m_enableTextures;
+    const bool useNormal = (overrideBinding != nullptr) ? overrideBinding->UseNormal : m_enableNormalMap;
+    const bool useRoughness = (overrideBinding != nullptr) ? overrideBinding->UseRoughness : m_enableRoughnessMap;
+
     D3D11_MAPPED_SUBRESOURCE ms{};
     if (SUCCEEDED(m_pDeviceContext->Map(m_pSceneCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)))
     {
@@ -427,11 +445,11 @@ void Render::RenderScene(float roughness, float metalness, const XMFLOAT3& albed
         cb->Roughness = (roughness < 0.04f) ? 0.04f : ((roughness > 1.0f) ? 1.0f : roughness);
         cb->Metalness = (metalness < 0.0f) ? 0.0f : ((metalness > 1.0f) ? 1.0f : metalness);
         cb->DebugMode = GetDebugMode();
-        cb->UseTexture = (m_enableTextures && m_pAlbedoTextureSRV != nullptr) ? 1.0f : 0.0f;
+        cb->UseTexture = (useAlbedo && albedoSrv != nullptr) ? 1.0f : 0.0f;
         cb->ExtendViews = m_extendViews ? 1.0f : 0.0f;
-        cb->UseNormalMap = (m_enableNormalMap && m_pNormalTextureSRV != nullptr) ? 1.0f : 0.0f;
+        cb->UseNormalMap = (useNormal && normalSrv != nullptr) ? 1.0f : 0.0f;
         cb->NormalStrength = (m_normalStrength < 0.0f) ? 0.0f : m_normalStrength;
-        cb->UseRoughnessMap = (m_enableRoughnessMap && m_pRoughnessTextureSRV != nullptr) ? 1.0f : 0.0f;
+        cb->UseRoughnessMap = (useRoughness && roughnessSrv != nullptr) ? 1.0f : 0.0f;
         cb->RoughnessMapStrength = (m_roughnessMapStrength < 0.0f) ? 0.0f : ((m_roughnessMapStrength > 1.0f) ? 1.0f : m_roughnessMapStrength);
         const bool useIrradianceAmbient = (!m_labUiMode || m_labAmbientSourceMode == 0);
         cb->UseDiffuseIBL = (m_enableDiffuseIBL && m_pIrradianceSRV != nullptr && useIrradianceAmbient) ? 1.0f : 0.0f;
@@ -687,10 +705,25 @@ HRESULT Render::InitCamera() {
 }
 
 HRESULT Render::InitModel(ModelFactory::ModelCode code) {
-    m_currentModel = ModelFactory::CreateModel(code, m_pDeviceContext);
-    if (!m_currentModel)
+    SetModel(code);
+    if (m_currentModel == nullptr)
         return E_FAIL;
-    return m_currentModel->InitModel(m_pDevice);
+
+    if (m_overlaySphereModel == nullptr)
+    {
+        m_overlaySphereModel = ModelFactory::CreateModel(ModelFactory::ModelCode::sphere, m_pDeviceContext);
+        if (m_overlaySphereModel != nullptr)
+        {
+            const HRESULT overlayHr = m_overlaySphereModel->InitModel(m_pDevice);
+            if (FAILED(overlayHr))
+            {
+                ModelFactory::ReleaseModel(m_overlaySphereModel);
+                m_overlaySphereModel = nullptr;
+            }
+        }
+    }
+
+    return S_OK;
 }
 
 void Render::Terminate()
@@ -714,6 +747,10 @@ void Render::Terminate()
         ModelFactory::ReleaseModel(m_currentModel);
         m_currentModel = nullptr;
     }
+    if (m_overlaySphereModel) {
+        ModelFactory::ReleaseModel(m_overlaySphereModel);
+        m_overlaySphereModel = nullptr;
+    }
 
     if (camera) {
         delete camera;
@@ -725,6 +762,8 @@ void Render::Terminate()
     if (m_pLightMarkerPixelShader) { m_pLightMarkerPixelShader->Release(); m_pLightMarkerPixelShader = nullptr; }
     if (m_pPixelShader) { m_pPixelShader->Release(); m_pPixelShader = nullptr; }
     if (m_pLightMarkerColorCB) { m_pLightMarkerColorCB->Release(); m_pLightMarkerColorCB = nullptr; }
+    if (m_pGltfRasterStateCullNone) { m_pGltfRasterStateCullNone->Release(); m_pGltfRasterStateCullNone = nullptr; }
+    if (m_pGltfDepthStateDisabled) { m_pGltfDepthStateDisabled->Release(); m_pGltfDepthStateDisabled = nullptr; }
 
     if (m_pSceneCB) {
         m_pSceneCB->Release();
@@ -762,8 +801,47 @@ void Render::Terminate()
 }
 
 void Render::SetModel(ModelFactory::ModelCode code) {
-    if (m_currentModel) ModelFactory::ReleaseModel(m_currentModel);
-    m_currentModel = ModelFactory::CreateModel(code, m_pDeviceContext);
+    if (m_pDevice == nullptr || m_pDeviceContext == nullptr)
+        return;
+
+    if (m_currentModel != nullptr && m_currentModelCode == code)
+        return;
+
+    ModelManagerAbstract* newModel = ModelFactory::CreateModel(code, m_pDeviceContext);
+    if (newModel == nullptr)
+        return;
+
+    HRESULT hr = newModel->InitModel(m_pDevice);
+    if (FAILED(hr))
+    {
+        DebugLogA("[MODEL] failed to init model code=%d (hr=0x%08X)\n", static_cast<int>(code), static_cast<unsigned int>(hr));
+        ModelFactory::ReleaseModel(newModel);
+        return;
+    }
+
+    if (m_currentModel != nullptr)
+    {
+        ModelFactory::ReleaseModel(m_currentModel);
+        m_currentModel = nullptr;
+    }
+
+    m_currentModel = newModel;
+    m_currentModelCode = code;
+    DebugLogA("[MODEL] active model code=%d\n", static_cast<int>(m_currentModelCode));
+    if (GltfModel* gltfModel = dynamic_cast<GltfModel*>(m_currentModel))
+    {
+        DebugLogA("[MODEL] gltf active primitives=%llu\n",
+            static_cast<unsigned long long>(gltfModel->GetPrimitiveCount()));
+    }
+    m_requestDiagnosticsDump = true;
+
+    if (m_currentModelCode != ModelFactory::ModelCode::sphere)
+    {
+        m_gridMode = false;
+        m_enableTextures = true;
+        m_enableNormalMap = true;
+        m_enableRoughnessMap = true;
+    }
 }
 
 
@@ -2417,8 +2495,9 @@ void Render::RenderImGui()
     const bool presetHasRoughnessSource = (activePreset.RoughnessPath != nullptr || activePreset.HeightPath != nullptr);
     const bool normalMapLoaded = (m_pNormalTextureSRV != nullptr);
     const bool roughnessMapLoaded = (m_pRoughnessTextureSRV != nullptr);
-    const bool canUseNormalMap = presetHasNormalSource && normalMapLoaded;
-    const bool canUseRoughnessMap = presetHasRoughnessSource && roughnessMapLoaded;
+    const bool gltfModelActive = (dynamic_cast<GltfModel*>(m_currentModel) != nullptr);
+    const bool canUseNormalMap = gltfModelActive ? true : (presetHasNormalSource && normalMapLoaded);
+    const bool canUseRoughnessMap = gltfModelActive ? true : (presetHasRoughnessSource && roughnessMapLoaded);
 
     ImGui::Begin("Lights");
     static int selectedLight = 0;
@@ -2464,14 +2543,58 @@ void Render::RenderImGui()
     ImGui::End();
 
     ImGui::Begin("Material");
+    struct ModelEntry
+    {
+        const char* Name;
+        ModelFactory::ModelCode Code;
+    };
+    static const ModelEntry kModelEntries[] =
+    {
+        { "Sphere", ModelFactory::ModelCode::sphere },
+        { "Impala", ModelFactory::ModelCode::gltfImpala },
+        { "LightSaber", ModelFactory::ModelCode::gltfLightSaber },
+        { "R2D2", ModelFactory::ModelCode::gltfR2D2 }
+    };
+
+    int modelUiIndex = 0;
+    for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kModelEntries)); ++i)
+    {
+        if (kModelEntries[i].Code == m_currentModelCode)
+        {
+            modelUiIndex = i;
+            break;
+        }
+    }
+    if (ImGui::Combo("Model", &modelUiIndex, [](void* data, int idx, const char** outText)
+        {
+            const ModelEntry* entries = static_cast<const ModelEntry*>(data);
+            *outText = entries[idx].Name;
+            return true;
+        }, (void*)kModelEntries, IM_ARRAYSIZE(kModelEntries)))
+    {
+        SetModel(kModelEntries[modelUiIndex].Code);
+    }
+
+    const bool isSphereModel = (m_currentModelCode == ModelFactory::ModelCode::sphere);
+    const bool isGltfModel = (dynamic_cast<GltfModel*>(m_currentModel) != nullptr);
+    if (!isSphereModel)
+        m_gridMode = false;
+
     if (!canUseNormalMap)
         m_enableNormalMap = false;
     if (!canUseRoughnessMap)
         m_enableRoughnessMap = false;
 
+    if (!isSphereModel)
+        ImGui::BeginDisabled(true);
     bool gridModeUi = m_gridMode;
     ImGui::Checkbox("Grid mode (instancing)", &gridModeUi);
     m_gridMode = gridModeUi;
+    if (!isSphereModel)
+    {
+        showDisabledHint("Grid mode is available only for Sphere.");
+        ImGui::EndDisabled();
+    }
 
     ImGui::Checkbox("Use albedo texture", &m_enableTextures);
 
@@ -2649,8 +2772,10 @@ void Render::RenderImGui()
         }
     }
 
-    const bool lockSingleMaterialByRoughnessTexture = (m_enableRoughnessMap && canUseRoughnessMap);
+    const bool lockSingleMaterialByRoughnessTexture = (m_enableRoughnessMap && canUseRoughnessMap && !isGltfModel);
     const bool lockSingleMaterialControls = lockSingleMaterialByRoughnessTexture;
+    if (isGltfModel)
+        ImGui::BeginDisabled(true);
     if (lockSingleMaterialControls)
         ImGui::BeginDisabled(true);
     ImGui::SliderFloat("Roughness", &m_materialRoughness, 0.04f, 1.0f);
@@ -2674,8 +2799,16 @@ void Render::RenderImGui()
         m_materialMetalness = 0.88f;
         m_materialColor = XMFLOAT3(0.98f, 0.98f, 0.98f);
     }
+    if (isGltfModel)
+    {
+        showDisabledHint("GLTF uses per-material factors from the model.");
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("Roughness/Metalness/Color are driven per GLTF material.");
+    }
 
     static const char* materialNames[] = { "Marble", "Roof", "Legacy cat" };
+    if (isGltfModel)
+        ImGui::BeginDisabled(true);
     int materialIdx = m_materialPresetIndex;
     if (ImGui::Combo("Material preset", &materialIdx, materialNames, IM_ARRAYSIZE(materialNames)))
     {
@@ -2685,6 +2818,11 @@ void Render::RenderImGui()
     if (m_labUiMode && ImGui::Button("Reload material textures"))
     {
         InitTextureResources();
+    }
+    if (isGltfModel)
+    {
+        showDisabledHint("Material presets are used by Sphere/Cube path only.");
+        ImGui::EndDisabled();
     }
 
     if (!m_gridMode)
@@ -2817,7 +2955,8 @@ void Render::RenderImGui()
 
 void Render::RenderSkybox()
 {
-    if (!m_enableSkybox || !m_pEnvironmentSRV || !m_pSkyVertexShader || !m_pSkyPixelShader || !m_currentModel)
+    ModelManagerAbstract* skyGeometry = (m_overlaySphereModel != nullptr) ? m_overlaySphereModel : m_currentModel;
+    if (!m_enableSkybox || !m_pEnvironmentSRV || !m_pSkyVertexShader || !m_pSkyPixelShader || !skyGeometry)
         return;
 
     ID3D11RasterizerState* oldRS = nullptr;
@@ -2826,10 +2965,10 @@ void Render::RenderSkybox()
     m_pDeviceContext->RSGetState(&oldRS);
     m_pDeviceContext->OMGetDepthStencilState(&oldDS, &oldStencilRef);
 
-    XMMATRIX skyModel =
+    XMMATRIX skyModelMatrix =
         XMMatrixScaling(30.0f, 30.0f, 30.0f) *
         XMMatrixTranslation(camera->position.x, camera->position.y, camera->position.z);
-    m_currentModel->SetModelMatrix(skyModel);
+    skyGeometry->SetModelMatrix(skyModelMatrix);
 
     m_pDeviceContext->RSSetState(m_pSkyRasterState);
     m_pDeviceContext->OMSetDepthStencilState(m_pSkyDepthState, 0);
@@ -2839,7 +2978,7 @@ void Render::RenderSkybox()
     m_pDeviceContext->PSSetShaderResources(0, 1, &m_pEnvironmentSRV);
     m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerState);
 
-    m_currentModel->Render();
+    skyGeometry->Render();
 
     ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
     m_pDeviceContext->PSSetShaderResources(0, 6, nullSRVs);
@@ -2852,7 +2991,8 @@ void Render::RenderSkybox()
 
 void Render::RenderLightMarkers()
 {
-    if (!m_currentModel || !m_pLightMarkerPixelShader || !m_pLightMarkerColorCB)
+    ModelManagerAbstract* markerModel = (m_overlaySphereModel != nullptr) ? m_overlaySphereModel : m_currentModel;
+    if (!markerModel || !m_pLightMarkerPixelShader || !m_pLightMarkerColorCB)
         return;
 
     ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
@@ -2874,7 +3014,7 @@ void Render::RenderLightMarkers()
         XMMATRIX lightModel =
             XMMatrixScaling(scale, scale, scale) *
             XMMatrixTranslation(gpu.Position.x, gpu.Position.y, gpu.Position.z);
-        m_currentModel->SetModelMatrix(lightModel);
+        markerModel->SetModelMatrix(lightModel);
 
         const float emissiveScale = 0.3f + 0.9f * m_lightBrightness[i];
         LightMarkerColorCB colorData{};
@@ -2886,7 +3026,7 @@ void Render::RenderLightMarkers()
         );
         m_pDeviceContext->UpdateSubresource(m_pLightMarkerColorCB, 0, nullptr, &colorData, 0, 0);
 
-        m_currentModel->Render();
+        markerModel->Render();
     }
 
     m_pDeviceContext->PSSetShader(m_pPixelShader, nullptr, 0);
@@ -2917,13 +3057,17 @@ void Render::UpdateCamera(WPARAM wParam, LPARAM lParam) {
             //camera->Move({ 0.0f, 0.0f, 1.0f });
             break;
         case VK_SPACE:
-            m_currentModel->ChangeRotationable();
+            if (m_currentModel != nullptr)
+                m_currentModel->ChangeRotationable();
             break;
         case '1': m_debugViewMode = DebugView_NDF; break;
         case '2': m_debugViewMode = DebugView_Geometry; break;
         case '3': m_debugViewMode = DebugView_Fresnel; break;
         case '4': m_debugViewMode = DebugView_Final; break;
-        case '5': m_gridMode = !m_gridMode; break;
+        case '5':
+            if (m_currentModelCode == ModelFactory::ModelCode::sphere)
+                m_gridMode = !m_gridMode;
+            break;
         case '6': m_enableTextures = !m_enableTextures; break;
         case '7': m_enableSkybox = !m_enableSkybox; break;
         case '8': m_requestDiagnosticsDump = true; break;
@@ -2932,6 +3076,16 @@ void Render::UpdateCamera(WPARAM wParam, LPARAM lParam) {
                 m_forceCopyPostprocess = !m_forceCopyPostprocess;
             else
                 m_forceCopyPostprocess = false;
+            break;
+        case '0':
+            m_debugGltfFlatOnly = !m_debugGltfFlatOnly;
+            DebugLogA("[GLTF][DBG] flatOnly=%d\n", m_debugGltfFlatOnly ? 1 : 0);
+            m_requestDiagnosticsDump = true;
+            break;
+        case 'P':
+            m_debugGltfDisableDepthTest = !m_debugGltfDisableDepthTest;
+            DebugLogA("[GLTF][DBG] depthOff=%d\n", m_debugGltfDisableDepthTest ? 1 : 0);
+            m_requestDiagnosticsDump = true;
             break;
 
         case 'R':
@@ -2972,8 +3126,117 @@ void Render::HandleMouse(UINT message, LPARAM lParam)
     }
 }
 
+void Render::DrawGltfObjects()
+{
+    GltfModel* gltfModel = dynamic_cast<GltfModel*>(m_currentModel);
+    if (gltfModel == nullptr)
+        return;
+
+    m_gridMode = false;
+    // Update local model animation/state first (rotation, user transforms).
+    m_currentModel->Update(0.0f);
+
+    if (m_pGltfRasterStateCullNone == nullptr && m_pDevice != nullptr)
+    {
+        D3D11_RASTERIZER_DESC rsDesc{};
+        rsDesc.FillMode = D3D11_FILL_SOLID;
+        rsDesc.CullMode = D3D11_CULL_NONE;
+        rsDesc.DepthClipEnable = TRUE;
+        const HRESULT rsHr = m_pDevice->CreateRasterizerState(&rsDesc, &m_pGltfRasterStateCullNone);
+        if (FAILED(rsHr))
+            DebugLogA("[GLTF] failed to create cull-none rasterizer state (hr=0x%08X)\n", static_cast<unsigned int>(rsHr));
+    }
+
+    ID3D11RasterizerState* oldRS = nullptr;
+    ID3D11DepthStencilState* oldDS = nullptr;
+    UINT oldStencilRef = 0;
+    m_pDeviceContext->RSGetState(&oldRS);
+    m_pDeviceContext->OMGetDepthStencilState(&oldDS, &oldStencilRef);
+    if (m_pGltfRasterStateCullNone != nullptr)
+        m_pDeviceContext->RSSetState(m_pGltfRasterStateCullNone);
+    if (m_debugGltfDisableDepthTest)
+    {
+        if (m_pGltfDepthStateDisabled == nullptr && m_pDevice != nullptr)
+        {
+            D3D11_DEPTH_STENCIL_DESC dsDesc{};
+            dsDesc.DepthEnable = FALSE;
+            dsDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            dsDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+            const HRESULT dsHr = m_pDevice->CreateDepthStencilState(&dsDesc, &m_pGltfDepthStateDisabled);
+            if (FAILED(dsHr))
+                DebugLogA("[GLTF] failed to create depth-off state (hr=0x%08X)\n", static_cast<unsigned int>(dsHr));
+        }
+        if (m_pGltfDepthStateDisabled != nullptr)
+            m_pDeviceContext->OMSetDepthStencilState(m_pGltfDepthStateDisabled, 0);
+    }
+
+    const XMMATRIX localModel = m_currentModel->GetModelMatrix();
+    const XMMATRIX drawModel = gltfModel->GetNormalizationMatrix() * localModel;
+    m_currentModel->SetModelMatrix(drawModel);
+    m_currentModel->Update(0.0f); // Upload composed matrix to VS constant buffer.
+
+    const size_t primitiveCount = gltfModel->GetPrimitiveCount();
+    for (size_t i = 0; i < primitiveCount; ++i)
+    {
+        GltfModel::PrimitiveInfo primitive{};
+        GltfModel::MaterialInfo material{};
+        if (!gltfModel->GetPrimitiveState(i, primitive, material))
+            continue;
+        (void)primitive;
+
+        MaterialBindingOverride binding{};
+        if (m_debugGltfFlatOnly)
+        {
+            binding.AlbedoSRV = nullptr;
+            binding.NormalSRV = nullptr;
+            binding.RoughnessSRV = nullptr;
+            binding.UseAlbedo = false;
+            binding.UseNormal = false;
+            binding.UseRoughness = false;
+        }
+        else
+        {
+            binding.AlbedoSRV = material.AlbedoSRV;
+            binding.NormalSRV = material.NormalSRV;
+            binding.RoughnessSRV = material.RoughnessSRV;
+            binding.UseAlbedo = m_enableTextures;
+            binding.UseNormal = m_enableNormalMap;
+            binding.UseRoughness = m_enableRoughnessMap;
+        }
+
+        ID3D11ShaderResourceView* albedoSrv = binding.AlbedoSRV;
+        ID3D11ShaderResourceView* normalSrv = binding.NormalSRV;
+        ID3D11ShaderResourceView* roughSrv = binding.RoughnessSRV;
+        m_pDeviceContext->PSSetShaderResources(0, 1, &albedoSrv);
+        m_pDeviceContext->PSSetShaderResources(1, 1, &normalSrv);
+        m_pDeviceContext->PSSetShaderResources(2, 1, &roughSrv);
+
+        RenderScene(material.Roughness, material.Metalness, material.BaseColor, &binding);
+        gltfModel->DrawPrimitive(i);
+    }
+
+    // Restore local model matrix so normalization does not accumulate frame-to-frame.
+    m_currentModel->SetModelMatrix(localModel);
+
+    m_pDeviceContext->RSSetState(oldRS);
+    m_pDeviceContext->OMSetDepthStencilState(oldDS, oldStencilRef);
+    if (oldRS != nullptr)
+        oldRS->Release();
+    if (oldDS != nullptr)
+        oldDS->Release();
+}
+
 void Render::DrawSceneObjects()
 {
+    if (m_currentModel == nullptr)
+        return;
+
+    if (dynamic_cast<GltfModel*>(m_currentModel) != nullptr)
+    {
+        DrawGltfObjects();
+        return;
+    }
+
     const float gridSphereScale = 0.35f;
     if (m_prevGridMode != m_gridMode)
     {
@@ -2991,7 +3254,7 @@ void Render::DrawSceneObjects()
         m_prevGridMode = m_gridMode;
     }
 
-    if (!m_gridMode)
+    if (!m_gridMode || m_currentModelCode != ModelFactory::ModelCode::sphere)
     {
         const float blendSpeed = 0.22f;
         m_singleSphereScale += (m_singleSphereScaleTarget - m_singleSphereScale) * blendSpeed;
@@ -3278,5 +3541,3 @@ void Render::Resize()
         m_pDeviceContext->RSSetViewports(1, &vp);
     }
 }
-
-

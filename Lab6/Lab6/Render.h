@@ -54,8 +54,18 @@ private:
     void SetDObjName(ID3D11DeviceChild* resource, const std::string& name);
     void InitLights();
     HRESULT InitScenBuffer();
-    void RenderScene(float roughness, float metalness, const XMFLOAT3& albedo);
+    struct MaterialBindingOverride
+    {
+        ID3D11ShaderResourceView* AlbedoSRV = nullptr;
+        ID3D11ShaderResourceView* NormalSRV = nullptr;
+        ID3D11ShaderResourceView* RoughnessSRV = nullptr;
+        bool UseAlbedo = false;
+        bool UseNormal = false;
+        bool UseRoughness = false;
+    };
+    void RenderScene(float roughness, float metalness, const XMFLOAT3& albedo, const MaterialBindingOverride* overrideBinding = nullptr);
     void DrawSceneObjects();
+    void DrawGltfObjects();
     void RenderSkybox();
     void RenderLightMarkers();
     int GetDebugMode() const;
@@ -126,6 +136,8 @@ private:
     int m_materialPresetIndex = 1;
     int m_skyboxFileIndex = 0;
     bool m_requestDiagnosticsDump = false;
+    bool m_debugGltfFlatOnly = false;
+    bool m_debugGltfDisableDepthTest = false;
     float m_materialRoughness = 0.04f;
     float m_materialMetalness = 0.99f;
     XMFLOAT3 m_materialColor = { 0.98f, 0.98f, 0.98f };
@@ -166,6 +178,8 @@ private:
     ID3D11ShaderResourceView* m_pIrradianceSRV = nullptr;
     ID3D11ShaderResourceView* m_pSpecularPrefilterSRV = nullptr;
     ID3D11ShaderResourceView* m_pBRDFLutSRV = nullptr;
+    ID3D11RasterizerState* m_pGltfRasterStateCullNone = nullptr;
+    ID3D11DepthStencilState* m_pGltfDepthStateDisabled = nullptr;
     UINT m_specularPrefilterSize = 128;
     UINT m_specularPrefilterMipLevels = 5;
     ID3D11RasterizerState* m_pSkyRasterState = nullptr;
@@ -205,6 +219,8 @@ private:
     POINT m_mousePos = { 0, 0 };
     Camera* camera; //
     ModelManagerAbstract* m_currentModel; //
+    ModelManagerAbstract* m_overlaySphereModel = nullptr;
+    ModelFactory::ModelCode m_currentModelCode = ModelFactory::ModelCode::sphere;
     ID3DUserDefinedAnnotation* m_pAnnotation = nullptr; //
     Postprocessing* m_PostProcessingPass; //
 };

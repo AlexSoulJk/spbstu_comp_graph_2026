@@ -153,6 +153,8 @@
 		<ClInclude Include="targetver.h" />
 		<ClInclude Include="Camera.h" />
 		<ClInclude Include="Cube.h" />
+		<ClInclude Include="GltfAssetLoader.h" />
+		<ClInclude Include="GltfModel.h" />
 		<ClInclude Include="ModelFactory.h" />
 		<ClInclude Include="ModelManagerAbstract.h" />
 		<ClInclude Include="Render.h" />
@@ -161,6 +163,8 @@
 	<ItemGroup>
 		<ClCompile Include="Camera.cpp" />
 		<ClCompile Include="Cube.cpp" />
+		<ClCompile Include="GltfAssetLoader.cpp" />
+		<ClCompile Include="GltfModel.cpp" />
 		<ClCompile Include="DDSTextureLoader11.cpp" />
 		<ClCompile Include="D3DInclude.cpp" />
 		<ClCompile Include="imgui\backends\imgui_impl_dx11.cpp" />
