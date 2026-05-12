@@ -55,14 +55,14 @@ private:
 		ID3D11Device* pDevice,
 		ID3D11DeviceContext* pContext);
 
-	ID3D11PixelShader* PSBrightness; //
-	ID3D11PixelShader* PSCopy; //
-	ID3D11PixelShader* PSHdr; //
+	ID3D11PixelShader* PSBrightness = nullptr; //
+	ID3D11PixelShader* PSCopy = nullptr; //
+	ID3D11PixelShader* PSHdr = nullptr; //
 
 	// tonemap vars
 	ScreenPlane screenPlane; //
-	ID3D11SamplerState* pSamplerState; //
-	ID3D11Texture2D* pAverageLumenCPUTexture; //
+	ID3D11SamplerState* pSamplerState = nullptr; //
+	ID3D11Texture2D* pAverageLumenCPUTexture = nullptr; //
 	std::vector<RenderTargetTexture*> scaledHDRTargets; //
 
 	int maxTextureWidth;
@@ -71,7 +71,8 @@ private:
 	std::chrono::steady_clock::time_point last;
 	float prevExposure = 0;
 	const float eyeAdaptationS = .30f;
-	ID3D11Buffer* PSConstantBuffer; //
+	ID3D11Buffer* PSConstantBuffer = nullptr; //
+	bool m_disableLuminanceReadback = false;
 
 	struct HDRConstantBuffer
 	{

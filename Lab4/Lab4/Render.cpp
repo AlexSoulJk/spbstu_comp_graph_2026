@@ -436,15 +436,19 @@ HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
 
     // �������� ���������� Direct3D 11
     D3D_FEATURE_LEVEL featureLevel;
+    UINT baseCreateFlags = 0;
+#ifdef _DEBUG
+    baseCreateFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
+    // Long-running irradiance convolution may exceed TDR on some GPUs.
+    // Try to allow long packets first; if unsupported, retry with default flags.
+    const UINT longWorkCreateFlags = baseCreateFlags | D3D11_CREATE_DEVICE_DISABLE_GPU_TIMEOUT;
     hr = D3D11CreateDevice(
         pAdapter,
         D3D_DRIVER_TYPE_UNKNOWN,
         nullptr,
-#ifdef _DEBUG
-        D3D11_CREATE_DEVICE_DEBUG,
-#else
-        0,
-#endif
+        longWorkCreateFlags,
         nullptr,
         0,
         D3D11_SDK_VERSION,
@@ -452,6 +456,24 @@ HRESULT Render::Init(WCHAR szTitle[], WCHAR szWindowClass[])
         &featureLevel,
         &m_pDeviceContext
     );
+
+    if (FAILED(hr))
+    {
+        DebugLogA("[LAB3][DIAG] D3D11CreateDevice with DISABLE_GPU_TIMEOUT failed (hr=0x%08X), retrying without flag\n",
+            static_cast<unsigned int>(hr));
+        hr = D3D11CreateDevice(
+            pAdapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            baseCreateFlags,
+            nullptr,
+            0,
+            D3D11_SDK_VERSION,
+            &m_pDevice,
+            &featureLevel,
+            &m_pDeviceContext
+        );
+    }
 
     if (FAILED(hr)) {
         
@@ -1028,6 +1050,8 @@ std::wstring Render::GetSelectedSkyboxDisplayName() const
 
 HRESULT Render::InitSkyResources()
 {
+    m_currentEnvironmentIsHdri = false;
+
     if (m_pSkyVertexShader) { m_pSkyVertexShader->Release(); m_pSkyVertexShader = nullptr; }
     if (m_pSkyPixelShader) { m_pSkyPixelShader->Release(); m_pSkyPixelShader = nullptr; }
     if (m_pEnvironmentSRV) { m_pEnvironmentSRV->Release(); m_pEnvironmentSRV = nullptr; }
@@ -1083,6 +1107,7 @@ HRESULT Render::InitSkyResources()
         idx = 0;
 
     EnvironmentEntry& selected = m_environmentEntries[idx];
+    m_currentEnvironmentIsHdri = (selected.SourceKind == EnvironmentSourceKind::Hdri);
     bool skyLoaded = false;
     HRESULT loadHr = E_FAIL;
 
@@ -1116,7 +1141,8 @@ HRESULT Render::InitSkyResources()
                 if (SUCCEEDED(loadHr) && hdr2DSRV != nullptr)
                 {
                     ID3D11ShaderResourceView* convertedCubeSRV = nullptr;
-                    loadHr = ConvertHDRIToCubemap(hdr2DSRV, 1024, &convertedCubeSRV);
+                    // Runtime conversion path: keep cube size moderate to avoid GPU timeout on weak GPUs.
+                    loadHr = ConvertHDRIToCubemap(hdr2DSRV, 512, &convertedCubeSRV);
                     hdr2DSRV->Release();
 
                     if (SUCCEEDED(loadHr) && convertedCubeSRV != nullptr)
@@ -1647,11 +1673,42 @@ HRESULT Render::ConvolveCubemapToIrradiance(
     m_pDeviceContext->RSSetViewports(1, &cubeViewport);
     m_pDeviceContext->RSSetState(cubeRasterState);
 
+    struct IrradianceParamsCB
+    {
+        float SampleDelta;
+        float Padding[3];
+    };
+
+    IrradianceParamsCB params{};
+    params.SampleDelta = m_currentEnvironmentIsHdri ? 0.0050f : 0.00375f;
+    D3D11_BUFFER_DESC paramsDesc{};
+    paramsDesc.Usage = D3D11_USAGE_DEFAULT;
+    paramsDesc.ByteWidth = sizeof(IrradianceParamsCB);
+    paramsDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    D3D11_SUBRESOURCE_DATA paramsInit{};
+    paramsInit.pSysMem = &params;
+    ID3D11Buffer* irradianceParamsCB = nullptr;
+    hr = m_pDevice->CreateBuffer(&paramsDesc, &paramsInit, &irradianceParamsCB);
+    if (FAILED(hr) || irradianceParamsCB == nullptr)
+    {
+        for (UINT i = 0; i < 6; ++i)
+            faceRTV[i]->Release();
+        irradianceSRV->Release();
+        irradianceTexture->Release();
+        convolutionPS->Release();
+        if (oldRTV) oldRTV->Release();
+        if (oldDSV) oldDSV->Release();
+        if (oldRasterState) oldRasterState->Release();
+        if (cubeRasterState) cubeRasterState->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+
     m_pDeviceContext->IASetInputLayout(m_pInputLayout);
     m_pDeviceContext->VSSetShader(m_pSkyVertexShader, nullptr, 0);
     m_pDeviceContext->PSSetShader(convolutionPS, nullptr, 0);
     m_pDeviceContext->PSSetShaderResources(0, 1, &environmentCubeSRV);
     m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerState);
+    m_pDeviceContext->PSSetConstantBuffers(4, 1, &irradianceParamsCB);
 
     XMVECTOR eye = XMVectorZero();
     CubeCaptureFace captureFaces[6]{};
@@ -1667,6 +1724,7 @@ HRESULT Render::ConvolveCubemapToIrradiance(
         irradianceSRV->Release();
         irradianceTexture->Release();
         convolutionPS->Release();
+        irradianceParamsCB->Release();
         if (oldRTV) oldRTV->Release();
         if (oldDSV) oldDSV->Release();
         if (oldRasterState) oldRasterState->Release();
@@ -1696,6 +1754,8 @@ HRESULT Render::ConvolveCubemapToIrradiance(
 
     ID3D11ShaderResourceView* nullSRV = nullptr;
     m_pDeviceContext->PSSetShaderResources(0, 1, &nullSRV);
+    ID3D11Buffer* nullCB = nullptr;
+    m_pDeviceContext->PSSetConstantBuffers(4, 1, &nullCB);
 
     m_pDeviceContext->OMSetRenderTargets(1, &oldRTV, oldDSV);
     m_pDeviceContext->RSSetViewports(1, &oldViewport);
@@ -1711,6 +1771,7 @@ HRESULT Render::ConvolveCubemapToIrradiance(
 
     irradianceTexture->Release();
     convolutionPS->Release();
+    irradianceParamsCB->Release();
 
     if (FAILED(hr))
     {
@@ -1963,13 +2024,6 @@ void Render::RenderImGui()
                 m_enableSkybox = true;
                 InitSkyResources();
             }
-            if (ImGui::IsItemHovered() &&
-                m_environmentEntries[i].SourceKind == EnvironmentSourceKind::Hdri &&
-                !m_environmentEntries[i].HasConvertedDDS &&
-                !m_environmentEntries[i].RuntimeConverted)
-            {
-                ImGui::SetTooltip("Select to convert HDRI to cubemap at runtime");
-            }
             if (isSelected)
                 ImGui::SetItemDefaultFocus();
         }
@@ -2022,6 +2076,7 @@ void Render::RenderImGui()
                 }
             }
         }
+
     }
 
     if (m_labUiMode)
@@ -2446,7 +2501,7 @@ void Render::RenderStart()
     m_PostProcessingPass->Update(m_pDevice, m_pDeviceContext);
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Render Frame");
 
-    // �������
+    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
     if (m_pAnnotation) m_pAnnotation->BeginEvent(L"Clear");
     //m_pDeviceContext->OMSetRenderTargets(1, &m_pRenderTargetView, nullptr);
     m_pDeviceContext->ClearState();
@@ -2676,3 +2731,4 @@ void Render::Resize()
         m_pDeviceContext->RSSetViewports(1, &vp);
     }
 }
+

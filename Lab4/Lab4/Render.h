@@ -190,6 +190,7 @@ private:
 
     std::vector<EnvironmentEntry> m_environmentEntries;
     std::vector<HdriCubemapCacheEntry> m_hdriCubemapCache;
+    bool m_currentEnvironmentIsHdri = false;
 
     WCHAR* m_szTitle;
     WCHAR* m_szWindowClass;

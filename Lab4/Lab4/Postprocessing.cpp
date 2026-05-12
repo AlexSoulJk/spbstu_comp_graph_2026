@@ -39,7 +39,12 @@ HRESULT Postprocessing::CompileShaderFromFile(const WCHAR* szFileName, LPCSTR sz
 	return S_OK;
 }
 
-Postprocessing::Postprocessing() : maxTextureHeight(0), maxTextureWidth(0) {}
+Postprocessing::Postprocessing()
+	: maxTextureHeight(0)
+	, maxTextureWidth(0)
+	, last(std::chrono::steady_clock::now())
+{
+}
 
 Postprocessing::~Postprocessing() {
 	Release();
@@ -203,8 +208,15 @@ HRESULT Postprocessing::applyTonemapEffect(
 	RenderTargetTexture* inputRTT,
 	RenderTargetTexture* resultRTT)
 {
+	if (pDevice == nullptr || pContext == nullptr || inputRTT == nullptr || resultRTT == nullptr)
+		return E_INVALIDARG;
+
+	if (scaledHDRTargets.empty() || pAverageLumenCPUTexture == nullptr || PSConstantBuffer == nullptr)
+		return E_FAIL;
+
 #ifdef _DEBUG
-	pAnnotation->BeginEvent(L"Average Brightness");
+	if (pAnnotation != nullptr)
+		pAnnotation->BeginEvent(L"Average Brightness");
 #endif
 
 	// Convert input RTT into BW texture
@@ -220,13 +232,42 @@ HRESULT Postprocessing::applyTonemapEffect(
 	pContext->OMSetRenderTargets(0, nullptr, nullptr);
 	resultRTT->set(pDevice, pContext);
 
-	D3D11_MAPPED_SUBRESOURCE averageTextureData;
-	ZeroMemory(&averageTextureData, sizeof(averageTextureData));
-	scaledHDRTargets.back()->copyToTexture(pAverageLumenCPUTexture, pDevice, pContext);
+	float averageLogBrightness = (prevExposure > 1e-4f) ? prevExposure : 1.0f;
+	HRESULT hr = S_OK;
+	if (!m_disableLuminanceReadback)
+	{
+		D3D11_MAPPED_SUBRESOURCE averageTextureData;
+		ZeroMemory(&averageTextureData, sizeof(averageTextureData));
+		scaledHDRTargets.back()->copyToTexture(pAverageLumenCPUTexture, pDevice, pContext);
 
-	HRESULT hr = pContext->Map(pAverageLumenCPUTexture, 0, D3D11_MAP_READ, 0, &averageTextureData);
-	float averageLogBrightness = std::exp(*(float*)averageTextureData.pData) - 1.0f;
-	pContext->Unmap(pAverageLumenCPUTexture, 0u);
+		hr = pContext->Map(pAverageLumenCPUTexture, 0, D3D11_MAP_READ, 0, &averageTextureData);
+		if (FAILED(hr) || averageTextureData.pData == nullptr)
+		{
+			// On runtime skybox rebuilds the GPU can be temporarily busy.
+			// Retry once after Flush and keep previous exposure if mapping still fails.
+			pContext->Flush();
+			ZeroMemory(&averageTextureData, sizeof(averageTextureData));
+			hr = pContext->Map(pAverageLumenCPUTexture, 0, D3D11_MAP_READ, 0, &averageTextureData);
+		}
+
+		if (SUCCEEDED(hr) && averageTextureData.pData != nullptr)
+		{
+			averageLogBrightness = std::exp(*(float*)averageTextureData.pData) - 1.0f;
+			pContext->Unmap(pAverageLumenCPUTexture, 0u);
+		}
+		else
+		{
+			if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+			{
+				m_disableLuminanceReadback = true;
+				OutputDebugStringA("[PostFX] Luminance readback disabled after device-removed/reset; using exposure fallback.\n");
+			}
+			else
+			{
+				OutputDebugStringA("[PostFX] Map(pAverageLumenCPUTexture) failed, using previous exposure fallback.\n");
+			}
+		}
+	}
 
 	// Make exposuring with EyeAdaptation
 	const auto old = last;
@@ -237,12 +278,14 @@ HRESULT Postprocessing::applyTonemapEffect(
 	prevExposure += (averageLogBrightness - prevExposure) * expGain;
 
 #ifdef _DEBUG
-	pAnnotation->EndEvent(); // Average Brightness
+	if (pAnnotation != nullptr)
+		pAnnotation->EndEvent(); // Average Brightness
 #endif
 
 	// Implementing tonemap
 #ifdef _DEBUG
-	pAnnotation->BeginEvent(L"Tonemaping");
+	if (pAnnotation != nullptr)
+		pAnnotation->BeginEvent(L"Tonemaping");
 #endif
 	pContext->PSSetShader(PSHdr, nullptr, 0u);
 
@@ -251,7 +294,7 @@ HRESULT Postprocessing::applyTonemapEffect(
 	D3D11_MAPPED_SUBRESOURCE subresource;
 	hr = pContext->Map(PSConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &subresource);
 	if (FAILED(hr))
-		return FAILED(hr);
+		return hr;
 
 	HDRConstantBuffer& sceneBuffer = *reinterpret_cast<HDRConstantBuffer*>(subresource.pData);
 	sceneBuffer.averageLumen = DirectX::XMFLOAT4(prevExposure, 0.f, 0.f, 0.f);
@@ -261,7 +304,8 @@ HRESULT Postprocessing::applyTonemapEffect(
 	processTexture(inputRTT, resultRTT, pDevice, pContext);
 
 #ifdef _DEBUG
-	pAnnotation->EndEvent(); // Average Brightness
+	if (pAnnotation != nullptr)
+		pAnnotation->EndEvent(); // Tonemaping
 #endif
 
 	return hr;
@@ -300,6 +344,7 @@ void Postprocessing::processTexture(
 
 void Postprocessing::Release() {
 	clearScaledHDRTargets();
+	m_disableLuminanceReadback = false;
 
 	if (PSConstantBuffer) { PSConstantBuffer->Release(); PSConstantBuffer = nullptr; }
 
