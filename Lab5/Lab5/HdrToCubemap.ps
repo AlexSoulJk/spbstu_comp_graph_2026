@@ -1,0 +1,50 @@
+Texture2D hdrEquirect : register(t0);
+SamplerState samplerState : register(s0);
+
+struct VS_OUTPUT
+{
+    float4 Pos : SV_POSITION;
+    float3 Dir : TEXCOORD0;
+};
+
+static const float PI = 3.14159265359f;
+static const float INV_PI = 1.0f / PI;
+static const float INV_TWO_PI = 1.0f / (2.0f * PI);
+
+float3 NormalizeDirection(float3 direction)
+{
+    return normalize(direction);
+}
+
+float ComputeLongitude(float3 unitDirection)
+{
+    return atan2(unitDirection.z, unitDirection.x);
+}
+
+float ComputeLatitude(float3 unitDirection)
+{
+    return acos(clamp(unitDirection.y, -1.0f, 1.0f));
+}
+
+float2 DirectionToLatLongUV(float3 direction)
+{
+    float3 unitDirection = NormalizeDirection(direction);
+    float longitude = ComputeLongitude(unitDirection);
+    float latitude = ComputeLatitude(unitDirection);
+
+    float u = longitude * INV_TWO_PI + 0.5f;
+    float v = latitude * INV_PI;
+    return float2(u, v);
+}
+
+float3 SampleEnvironmentAtDirection(float3 direction)
+{
+    float2 uv = DirectionToLatLongUV(direction);
+    return hdrEquirect.SampleLevel(samplerState, uv, 0).rgb;
+}
+
+float4 main(VS_OUTPUT input) : SV_Target
+{
+    float3 color = SampleEnvironmentAtDirection(input.Dir);
+    return float4(color, 1.0f);
+}
